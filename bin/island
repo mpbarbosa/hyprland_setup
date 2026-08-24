@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Start, stop or report the dynamic island.
+#
+# Separate from the picker because their lifetimes are opposites: the picker is launched
+# on a key, applies one thing and exits, while the island has to stay up across every
+# switch. The panel drives this rather than owning the process, so closing the panel does
+# not take the island with it.
+#
+# `qs kill` exits 0 whether or not it killed anything, so `status` has to come from
+# `qs list` instead.
+
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+config="$here/island.qml"
+
+running() { qs list -p "$config" 2>/dev/null | grep -q "Process ID:"; }
+
+case "${1:-status}" in
+    status)  running && echo running || echo stopped ;;
+    start)   running || setsid qs -p "$config" >/dev/null 2>&1 & ;;
+    stop)    running && qs kill -p "$config" >/dev/null 2>&1 || true ;;
+    toggle)  if running; then qs kill -p "$config" >/dev/null 2>&1 || true
+             else setsid qs -p "$config" >/dev/null 2>&1 & fi ;;
+    *)       printf 'usage: island [status|start|stop|toggle]\n' >&2; exit 1 ;;
+esac

@@ -13,7 +13,10 @@ PanelWindow {
     required property var uiColors
     required property string error
 
+    required property bool islandRunning
+
     signal applyRequested(string name)
+    signal islandToggleRequested()
     signal dismissed()
 
     property int selection: 0
@@ -113,7 +116,7 @@ PanelWindow {
         // and the two gaps between them. Guessing high here leaves dead space under a
         // short filtered list.
         height: Math.min(picker.height - 140,
-                         118 + Math.max(picker.rowHeight,
+                         118 + 58 + Math.max(picker.rowHeight,
                                         picker.filtered.length * (picker.rowHeight + picker.rowSpacing) - picker.rowSpacing))
         radius: 14
         color: picker.uiColors["ground-solid"]
@@ -176,6 +179,14 @@ PanelWindow {
                     Keys.onReturnPressed: picker.activate()
                     Keys.onEnterPressed: picker.activate()
                     Keys.onEscapePressed: picker.dismissed()
+                    // The rest of this panel is driven from the keyboard, so the island
+                    // row is too rather than being the one mouse-only control in it.
+                    Keys.onPressed: function (event) {
+                        if (event.key === Qt.Key_I && (event.modifiers & Qt.ControlModifier)) {
+                            picker.islandToggleRequested();
+                            event.accepted = true;
+                        }
+                    }
 
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
@@ -190,7 +201,9 @@ PanelWindow {
             ListView {
                 id: list
                 width: parent.width
-                height: parent.height - y
+                // Leaves room for the island row below; without subtracting it the list
+                // claims the remainder and the row is laid out past the sheet's edge.
+                height: parent.height - y - islandRow.height - parent.spacing
                 clip: true
                 spacing: picker.rowSpacing
                 model: picker.filtered
@@ -213,6 +226,64 @@ PanelWindow {
                     active: modelData.name === picker.current
                     selected: index === picker.selection
                     onClicked: picker.applyRequested(modelData.name)
+                }
+            }
+
+            // Not a waybar setup, so it sits apart from the list rather than in it: the
+            // island is a separate process with its own lifetime, and the only thing the
+            // panel does is start and stop it.
+            Rectangle {
+                id: islandRow
+                width: parent.width
+                height: 46
+                radius: 8
+                color: islandHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.06) : "transparent"
+                border.width: 1
+                border.color: Qt.alpha(picker.uiColors["ink-faint"], 0.35)
+
+                HoverHandler { id: islandHover }
+                TapHandler { onTapped: picker.islandToggleRequested() }
+
+                Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    spacing: 2
+
+                    Text {
+                        text: "Dynamic island"
+                        color: picker.uiColors.ink
+                        font.family: "Hack Nerd Font"
+                        font.pixelSize: 13
+                    }
+                    Text {
+                        text: "volume and media, under the bar"
+                        color: picker.uiColors["ink-muted"]
+                        font.family: "Hack Nerd Font"
+                        font.pixelSize: 11
+                    }
+                }
+
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    width: 46
+                    height: 22
+                    radius: height / 2
+                    color: picker.islandRunning ? picker.uiColors["accent-alt"]
+                                                : Qt.alpha(picker.uiColors["ink-faint"], 0.35)
+                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                    Rectangle {
+                        width: 16
+                        height: 16
+                        radius: 8
+                        y: 3
+                        x: picker.islandRunning ? parent.width - width - 3 : 3
+                        color: picker.uiColors["ground-solid"]
+                        Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                    }
                 }
             }
         }
@@ -246,7 +317,7 @@ PanelWindow {
         anchors.horizontalCenter: sheet.horizontalCenter
         anchors.top: sheet.bottom
         anchors.topMargin: 10
-        text: "↑↓ move · Enter apply · Esc cancel"
+        text: "↑↓ move · Enter apply · Ctrl+I island · Esc cancel"
         color: Qt.alpha(picker.uiColors.ink, 0.55)
         font.family: "Hack Nerd Font"
         font.pixelSize: 11

@@ -12,6 +12,7 @@ ShellRoot {
     // Resolved from the QML file's own location rather than hardcoded, so the repo runs
     // from wherever it was cloned. Process wants a plain path, not a file:// URL.
     readonly property string helper: Qt.resolvedUrl("scripts/waybar-setup").toString().replace(/^file:\/\//, "")
+    readonly property string islandBin: Qt.resolvedUrl("bin/island").toString().replace(/^file:\/\//, "")
 
     property var setups: []
     property string current: "default"
@@ -148,6 +149,33 @@ ShellRoot {
         }
     }
 
+    // The island is a separate long-lived process, so the panel reports and flips it
+    // rather than owning it — closing the panel must not take the island down with it.
+    property bool islandRunning: false
+
+    Process {
+        id: islandStatus
+        running: true
+        command: [root.islandBin, "status"]
+        stdout: StdioCollector {
+            onStreamFinished: root.islandRunning = this.text.trim() === "running"
+        }
+    }
+
+    Process {
+        id: islandToggle
+        command: [root.islandBin, "toggle"]
+        // Re-ask rather than assume: starting can fail, and a toggle that lies about the
+        // result is worse than one that takes a moment to tell the truth.
+        onExited: islandRecheck.restart()
+    }
+
+    Timer {
+        id: islandRecheck
+        interval: 500
+        onTriggered: islandStatus.running = true
+    }
+
     Process {
         id: applier
         stderr: StdioCollector {
@@ -186,6 +214,8 @@ ShellRoot {
         uiColors: root.uiColors
         error: root.error
         onApplyRequested: function (name) { root.apply(name); }
+        islandRunning: root.islandRunning
+        onIslandToggleRequested: islandToggle.running = true
         onDismissed: Qt.quit()
     }
 }

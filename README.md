@@ -41,7 +41,7 @@ Running it again closes it, so it behaves as a toggle when bound to a key. In Hy
 bindd = $mainMod SHIFT, T, Waybar setup, exec, ~/Documents/GitHub/hyprland_setup/bin/waybar-setup-gui
 ```
 
-`↑` `↓` move, `Enter` applies, `Esc` cancels. Clicking a row applies it; clicking outside
+`↑` `↓` move, `Enter` applies, `Ctrl+I` toggles the island, `Esc` cancels. Clicking a row applies it; clicking outside
 cancels.
 
 Typing ranks rather than merely filters, and knows the names are kebab-case, so `tn` finds
@@ -50,6 +50,30 @@ contain one.
 
 Applying writes the chosen name to `$XDG_STATE_HOME/waybar/theme` and restarts the bar, so
 the choice survives a relogin.
+
+## Dynamic island
+
+A pill under the bar that wakes up when something happens worth a glance — the volume
+moved, the track changed — and goes quiet again a couple of seconds later. It reads the
+same resolved palette the picker does, so it wears whatever the bar is wearing, and
+re-reads it when the theme state file changes.
+
+```bash
+./bin/island toggle     # also start | stop | status
+```
+
+Or from the panel: the row at the bottom, or `Ctrl+I`.
+
+It runs as its own quickshell config rather than inside the panel, because their lifetimes
+are opposites — the panel is launched on a key, applies one thing and exits, while the
+island has to outlive every switch. The panel starts and stops it; closing the panel
+leaves it running.
+
+Nothing starts it at login yet. Add one line if you want it always on:
+
+```
+exec-once = ~/Documents/GitHub/hyprland_setup/bin/island start
+```
 
 ## Without the GUI
 
@@ -74,6 +98,9 @@ hand — trusting it would mark the wrong row as live.
 | `Picker.qml` | the overlay window, filtering and keyboard handling |
 | `SetupCard.qml` | one row |
 | `BarPreview.qml` | the miniature bar |
+| `island.qml` | the island's entry point; sources, state and window |
+| `IslandPill.qml` | the pill that morphs |
+| `bin/island` | start / stop / toggle / status |
 | `modules/common/Fuzzy.qml` | ranking for the filter |
 | `modules/common/PickerState.qml` | the cache, as a `FileView` + `JsonAdapter` |
 | `scripts/waybar-setup` | discovery, colour resolution, applying |
