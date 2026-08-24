@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import qs.modules.common
 
 // The picker itself: a full-screen overlay layer with a card floating in it, the same
 // shape wofi takes, so the two pickers feel like the same gesture.
@@ -26,12 +27,9 @@ PanelWindow {
     readonly property int rowHeight: 62
     readonly property int rowSpacing: 4
 
-    readonly property var filtered: {
-        if (query === "")
-            return setups;
-        var q = query.toLowerCase();
-        return setups.filter(function (s) { return s.name.toLowerCase().indexOf(q) !== -1; });
-    }
+    // Ranked, not just filtered: a plain substring test puts catppuccin above tokyo-night
+    // for "tn" and offers no way to type an abbreviation at all.
+    readonly property var filtered: Fuzzy.filter(setups, query, "name")
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -39,6 +37,12 @@ PanelWindow {
     WlrLayershell.namespace: "waybar-setup-picker"
     // Exclusive rather than OnDemand: the picker is modal and is driven by typing, and
     // OnDemand would leave the first keystroke going to whatever was focused underneath.
+    //
+    // A HyprlandFocusGrab was tried here and removed. Under Exclusive it never clears, so
+    // it is dead weight; under OnDemand the surface never holds focus, the grab clears
+    // immediately and the picker dismisses itself within seconds of opening. It is the
+    // right primitive for a sidebar that does not cover the screen, not for a full-screen
+    // modal whose backdrop already catches outside clicks.
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
 
     // ListView assigns currentIndex itself whenever the model changes, which silently

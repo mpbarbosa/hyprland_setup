@@ -41,8 +41,12 @@ Running it again closes it, so it behaves as a toggle when bound to a key. In Hy
 bindd = $mainMod SHIFT, T, Waybar setup, exec, ~/Documents/GitHub/hyprland_setup/bin/waybar-setup-gui
 ```
 
-`↑` `↓` move, `Enter` applies, `Esc` cancels, and typing filters. Clicking a row applies it;
-clicking outside cancels.
+`↑` `↓` move, `Enter` applies, `Esc` cancels. Clicking a row applies it; clicking outside
+cancels.
+
+Typing ranks rather than merely filters, and knows the names are kebab-case, so `tn` finds
+`tokyo-night`, `rp` finds `rose-pine`, and `n` puts `nord` above the longer names that also
+contain one.
 
 Applying writes the chosen name to `$XDG_STATE_HOME/waybar/theme` and restarts the bar, so
 the choice survives a relogin.
@@ -70,10 +74,26 @@ hand — trusting it would mark the wrong row as live.
 | `Picker.qml` | the overlay window, filtering and keyboard handling |
 | `SetupCard.qml` | one row |
 | `BarPreview.qml` | the miniature bar |
+| `modules/common/Fuzzy.qml` | ranking for the filter |
+| `modules/common/PickerState.qml` | the cache, as a `FileView` + `JsonAdapter` |
 | `scripts/waybar-setup` | discovery, colour resolution, applying |
 | `bin/waybar-setup-gui` | toggling launcher |
 
 QML only ever sees resolved values; paths, processes and CSS stop at `shell.qml`.
+
+Singletons live under `modules/` and are imported as `qs.modules.common` — quickshell
+registers the config root as `qs`, so no `qmldir` is needed.
+
+## Startup
+
+The picker paints from a cache at `$XDG_STATE_HOME/hyprland-setup/picker.json` and starts a
+live refresh at the same time, so rows are on screen at ~14ms rather than ~137ms and a
+stylesheet added since the last run appears a frame later. What is cached is the helper's
+raw stdout, so there is only one parsing path rather than a second one for JSON.
+
+`waybar-setup list` reads each stylesheet in a single `awk` pass. Resolving ten tokens with
+a `grep` apiece across three files for fifteen setups meant roughly 1350 process spawns and
+a full second before the first row could be drawn.
 
 ## Requires
 

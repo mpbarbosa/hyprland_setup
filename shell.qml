@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Io
 import QtQuick
+import qs.modules.common
 
 // Entry point. Everything that talks to the system lives here; Picker and its delegates
 // only ever see already-resolved values, which keeps the drawing code free of paths,
@@ -92,12 +93,35 @@ ShellRoot {
         return rows;
     }
 
+    // Paint from the cache first, then let the live answer replace it. Guarded on the
+    // list being empty so a refresh that has already landed is never overwritten by a
+    // stale cache arriving late.
+    function seedFromCache() {
+        if (root.setups.length > 0)
+            return;
+        if (PickerState.state.listOutput !== "")
+            root.setups = root.parseSetups(PickerState.state.listOutput);
+        if (PickerState.state.current !== "")
+            root.current = PickerState.state.current;
+    }
+
+    Component.onCompleted: seedFromCache()
+
+    Connections {
+        target: PickerState
+        function onReadyChanged() { root.seedFromCache(); }
+    }
+
     Process {
         id: lister
         running: true
         command: [root.helper, "list"]
         stdout: StdioCollector {
-            onStreamFinished: root.setups = root.parseSetups(this.text)
+            onStreamFinished: {
+                root.setups = root.parseSetups(this.text);
+                PickerState.state.listOutput = this.text;
+                PickerState.save();
+            }
         }
         stderr: StdioCollector {
             onStreamFinished: if (this.text.trim() !== "") root.error = this.text.trim()
@@ -115,8 +139,11 @@ ShellRoot {
         stdout: StdioCollector {
             onStreamFinished: {
                 var name = this.text.trim();
-                if (name !== "")
+                if (name !== "") {
                     root.current = name;
+                    PickerState.state.current = name;
+                    PickerState.save();
+                }
             }
         }
     }

@@ -56,22 +56,50 @@ names() {
     done
 }
 
-colour_of() {   # $1 = css file, $2 = token
-    { grep -m1 "^@define-color $2 " "$1" 2>/dev/null || true; } \
-        | sed 's/.*@define-color[[:space:]]*[a-z-]*[[:space:]]*//; s/;.*//' \
-        | tr -d '[:space:]'
+# Every @define-color in a file, as "token<TAB>value" lines.
+#
+# One awk pass per file rather than a grep per token: resolving ten tokens across three
+# files for fifteen setups the other way meant roughly 1350 process spawns and a full
+# second of latency before the picker could paint a single row.
+#
+# Last definition wins, which is what GTK does within a file — the previous grep -m1 took
+# the first, and the two only agreed because no stylesheet happens to define a token twice.
+read_defines() {   # $1 = css file
+    [ -r "$1" ] || return 0
+    awk '''
+        /^@define-color[ \t]/ {
+            line = $0
+            sub(/^@define-color[ \t]+/, "", line)
+            name = line; sub(/[ \t].*$/, "", name)
+            val  = line; sub(/^[^ \t]+[ \t]+/, "", val); sub(/;.*$/, "", val)
+            gsub(/[ \t]/, "", val)
+            if (name != "" && val != "") print name "\t" val
+        }
+    ''' "$1"
 }
 
-# Look a token up in the setup's own stylesheet, then the base one it @imports, then the
-# shared palette. That is the order GTK itself resolves @define-color in, so a swatch
-# cannot claim a colour the bar does not actually render.
-resolve() {     # $1 = setup, $2 = token
-    local f v
-    for f in "$(style_of "$1")" "$CFG_DIR/style.css" "$PALETTE"; do
-        [ -r "$f" ] || continue
-        v=$(colour_of "$f" "$2")
-        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+# The palette and the base stylesheet are the same for every setup, so they are read once
+# and each setup only pays for its own file on top.
+declare -A BASE
+declare -A CUR
+
+build_base() {
+    local f t v
+    for f in "$PALETTE" "$CFG_DIR/style.css"; do
+        while IFS=$'\t' read -r t v; do BASE["$t"]=$v; done < <(read_defines "$f")
     done
+}
+
+# Palette, then the style.css a theme @imports, then the theme itself — the order GTK
+# resolves @define-color in, so a swatch cannot claim a colour the bar does not render.
+setup_colors() {   # $1 = setup name -> fills CUR
+    local f t v
+    CUR=()
+    for t in "${!BASE[@]}"; do CUR["$t"]=${BASE[$t]}; done
+    f=$(style_of "$1")
+    if [ "$f" != "$CFG_DIR/style.css" ]; then
+        while IFS=$'\t' read -r t v; do CUR["$t"]=$v; done < <(read_defines "$f")
+    fi
 }
 
 # Only ever used to orient the preview, so a missed match falling back to "top" costs a
@@ -92,11 +120,14 @@ cmd_list() {
     printf '\t%s' "${TOKENS[@]}"
     printf '\n'
 
+    build_base
+
     local n own t
     while read -r n; do
         if [ "$n" != default ] && [ -r "$CFG_DIR/config-$n.jsonc" ]; then own=1; else own=0; fi
+        setup_colors "$n"
         printf '%s\t%s\t%s' "$n" "$own" "$(position_of "$(config_of "$n")")"
-        for t in "${TOKENS[@]}"; do printf '\t%s' "$(resolve "$n" "$t")"; done
+        for t in "${TOKENS[@]}"; do printf '\t%s' "${CUR[$t]-}"; done
         printf '\n'
     done < <(names)
 }
