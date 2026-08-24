@@ -69,16 +69,23 @@ PanelWindow {
             picker.applyRequested(filtered[selection].name);
     }
 
-    // Re-anchor on the running setup whenever the list or the filter changes, so the
-    // selection starts somewhere meaningful instead of always at the top.
+    // With no query, the running setup is the meaningful place to start. Once something
+    // has been typed it is the best match instead: the list is ranked, so index 0 is what
+    // the query asked for, and staying anchored on the running setup would make Enter
+    // apply the wrong one whenever that setup happens to match too — typing "tn" ranks
+    // tokyo-night first but would have applied a still-matching catppuccin.
     function resetSelection() {
-        for (var i = 0; i < filtered.length; i++) {
-            if (filtered[i].name === current) {
-                selection = i;
-                return;
+        var target = 0;
+        if (query === "") {
+            for (var i = 0; i < filtered.length; i++) {
+                if (filtered[i].name === current) {
+                    target = i;
+                    break;
+                }
             }
         }
-        selection = 0;
+        selection = target;
+        syncView();   // the assignment is often a no-op, and the view still has to follow
     }
 
     onFilteredChanged: resetSelection()
