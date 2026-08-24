@@ -21,6 +21,7 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/waybar"
 STATE_FILE="$STATE_DIR/theme"
 LAUNCH="$HOME/.config/hypr/scripts/waybar-launch.sh"
 WALLPAPER="$HOME/.config/hypr/scripts/wallpaper.sh"
+THEME_APPLY="$HOME/.config/hypr/scripts/theme-apply.sh"
 
 # Emitted as a header line by `list` so the GUI maps columns by name rather than by
 # position, and adding a token here does not mean editing QML.
@@ -177,6 +178,13 @@ cmd_apply() {
     # Backgrounded so a slow swaybg start cannot hold the bar back from reappearing.
     if [ -x "$WALLPAPER" ]; then
         setsid "$WALLPAPER" >/dev/null 2>&1 &
+    fi
+
+    # dunst and the window borders follow the theme too. Run in the foreground and before
+    # the notification below, so the notification announcing the switch is itself already
+    # wearing it. Both calls are hyprctl/dunstctl round trips, so this costs milliseconds.
+    if [ -x "$THEME_APPLY" ]; then
+        "$THEME_APPLY" || true
     fi
 
     if command -v notify-send >/dev/null; then
