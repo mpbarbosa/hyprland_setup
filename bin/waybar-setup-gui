@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Launch the picker, or close it if it is already up.
+#
+# Bound to a key, a plain launch is a trap: the picker takes an exclusive-keyboard layer,
+# so pressing the key again would stack a second overlay over the first and the only way
+# out would be the mouse. Toggling makes the same key open and close it.
+#
+# `qs kill` exits 0 whether or not it killed anything, so the running check has to come
+# from `qs list` rather than from the kill's status.
+
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+if qs list -p "$here" 2>/dev/null | grep -q "Process ID:"; then
+    exec qs kill -p "$here"
+fi
+
+exec qs -p "$here"

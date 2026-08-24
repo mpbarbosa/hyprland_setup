@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# What a "waybar setup" is, in one place, so the quickshell GUI stays presentation-only
+# and the same answers are available from a terminal when the GUI is what's broken.
+#
+# A setup is a name. A `style-<name>.css` sitting beside `style.css` is what makes the
+# name exist; a matching `config-<name>.jsonc` is optional and means the setup also
+# rearranges modules rather than only recolouring them. "default" is the bare
+# style.css + config.jsonc pair.
+#
+# This deliberately mirrors waybar-launch.sh in the dotfiles rather than importing it:
+# that script resolves the same two paths at login from the same state file, and if the
+# two ever disagree the GUI shows one bar and the next login starts another. Applying
+# still hands off to waybar-launch.sh when it is present, so the launch itself has a
+# single owner.
+
+set -euo pipefail
+
+CFG_DIR="${WAYBAR_CONFIG_DIR:-$HOME/.config/waybar}"
+PALETTE="${WAYBAR_PALETTE:-$HOME/.config/theme/colors.css}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/waybar"
+STATE_FILE="$STATE_DIR/theme"
+LAUNCH="$HOME/.config/hypr/scripts/waybar-launch.sh"
+WALLPAPER="$HOME/.config/hypr/scripts/wallpaper.sh"
+
+# Emitted as a header line by `list` so the GUI maps columns by name rather than by
+# position, and adding a token here does not mean editing QML.
+TOKENS=(ground ground-solid ink ink-muted ink-faint accent accent-alt warn crit ok)
+
+die() { printf 'waybar-setup: %s\n' "$1" >&2; exit 1; }
+
+style_of() {
+    if [ "$1" != default ] && [ -r "$CFG_DIR/style-$1.css" ]; then
+        printf '%s' "$CFG_DIR/style-$1.css"
+    else
+        printf '%s' "$CFG_DIR/style.css"
+    fi
+}
+
+config_of() {
+    if [ "$1" != default ] && [ -r "$CFG_DIR/config-$1.jsonc" ]; then
+        printf '%s' "$CFG_DIR/config-$1.jsonc"
+    else
+        printf '%s' "$CFG_DIR/config.jsonc"
+    fi
+}
+
+# Discovered from the filesystem rather than listed, so dropping in a new stylesheet is
+# the whole of "adding a setup". The glob sorts, and default is pinned first.
+names() {
+    printf 'default\n'
+    local f n
+    for f in "$CFG_DIR"/style-*.css; do
+        [ -e "$f" ] || continue          # no match leaves the glob literal
+        n=${f##*/style-}
+        printf '%s\n' "${n%.css}"
+    done
+}
+
+colour_of() {   # $1 = css file, $2 = token
+    { grep -m1 "^@define-color $2 " "$1" 2>/dev/null || true; } \
+        | sed 's/.*@define-color[[:space:]]*[a-z-]*[[:space:]]*//; s/;.*//' \
+        | tr -d '[:space:]'
+}
+
+# Look a token up in the setup's own stylesheet, then the base one it @imports, then the
+# shared palette. That is the order GTK itself resolves @define-color in, so a swatch
+# cannot claim a colour the bar does not actually render.
+resolve() {     # $1 = setup, $2 = token
+    local f v
+    for f in "$(style_of "$1")" "$CFG_DIR/style.css" "$PALETTE"; do
+        [ -r "$f" ] || continue
+        v=$(colour_of "$f" "$2")
+        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    done
+}
+
+# Only ever used to orient the preview, so a missed match falling back to "top" costs a
+# sideways mock bar and nothing else. Commented-out lines are dropped first because a
+# config that documents an alternative position would otherwise win the match.
+position_of() {  # $1 = config file
+    local p=""
+    if [ -r "$1" ]; then
+        p=$({ grep -vE '^[[:space:]]*//' "$1" \
+            | grep -m1 -oE '"position"[[:space:]]*:[[:space:]]*"[a-z]+"' \
+            | grep -oE '[a-z]+"$' || true; } | tr -d '"')
+    fi
+    printf '%s' "${p:-top}"
+}
+
+cmd_list() {
+    printf 'name\town_config\tposition'
+    printf '\t%s' "${TOKENS[@]}"
+    printf '\n'
+
+    local n own t
+    while read -r n; do
+        if [ "$n" != default ] && [ -r "$CFG_DIR/config-$n.jsonc" ]; then own=1; else own=0; fi
+        printf '%s\t%s\t%s' "$n" "$own" "$(position_of "$(config_of "$n")")"
+        for t in "${TOKENS[@]}"; do printf '\t%s' "$(resolve "$n" "$t")"; done
+        printf '\n'
+    done < <(names)
+}
+
+# The running bar is the truth here, not the state file. The state file records what the
+# next login will start, and the two drift the moment waybar is started by hand — showing
+# the stale one would mark the wrong entry as active in the picker.
+cmd_current() {
+    local pid style n
+    for pid in $(pgrep -x waybar 2>/dev/null || true); do
+        style=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null \
+            | awk '$0 == "-s" { getline; print; exit }') || true
+        [ -n "$style" ] || continue
+        style=${style##*/}
+        case "$style" in
+            style.css)   printf 'default\n'; return ;;
+            style-*.css) n=${style#style-}; printf '%s\n' "${n%.css}"; return ;;
+        esac
+    done
+
+    if [ -r "$STATE_FILE" ]; then
+        n=$(tr -d '[:space:]' < "$STATE_FILE")
+        if [ -n "$n" ]; then printf '%s\n' "$n"; return; fi
+    fi
+    printf 'default\n'
+}
+
+cmd_apply() {
+    local n=${1:-}
+    [ -n "$n" ] || die "apply needs a setup name"
+    if [ "$n" != default ] && [ ! -r "$CFG_DIR/style-$n.css" ]; then
+        die "no such setup: $n"
+    fi
+
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$n" > "$STATE_FILE"
+
+    pkill waybar 2>/dev/null || true
+    # waybar-launch.sh re-reads the state file we just wrote, which is why the write comes
+    # first. Falling back to a direct launch keeps this repo usable without the dotfiles.
+    if [ -x "$LAUNCH" ]; then
+        setsid "$LAUNCH" >/dev/null 2>&1 &
+    else
+        setsid waybar -c "$(config_of "$n")" -s "$(style_of "$n")" >/dev/null 2>&1 &
+    fi
+
+    # Backgrounded so a slow swaybg start cannot hold the bar back from reappearing.
+    if [ -x "$WALLPAPER" ]; then
+        setsid "$WALLPAPER" >/dev/null 2>&1 &
+    fi
+
+    if command -v notify-send >/dev/null; then
+        notify-send -h "string:x-dunst-stack-tag:waybar-theme" -t 1500 -u low \
+            "Waybar setup" "$n" || true
+    fi
+}
+
+case "${1:-list}" in
+    list)    cmd_list ;;
+    current) cmd_current ;;
+    apply)   shift; cmd_apply "$@" ;;
+    *)       die "usage: waybar-setup [list|current|apply <name>]" ;;
+esac
