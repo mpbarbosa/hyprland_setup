@@ -13,6 +13,7 @@ ShellRoot {
     // from wherever it was cloned. Process wants a plain path, not a file:// URL.
     readonly property string helper: Qt.resolvedUrl("scripts/waybar-setup").toString().replace(/^file:\/\//, "")
     readonly property string islandBin: Qt.resolvedUrl("bin/island").toString().replace(/^file:\/\//, "")
+    readonly property string termHelper: Qt.resolvedUrl("scripts/hypr-terminal").toString().replace(/^file:\/\//, "")
 
     property var setups: []
     property string current: "default"
@@ -149,6 +150,61 @@ ShellRoot {
         }
     }
 
+    // ---------------------------------------------------------------- terminals
+    property var terminals: []
+    property string currentTerminal: ""
+
+    // Same header-led TSV shape as `waybar-setup list`, so this parser is the same idea:
+    // map columns by name, never by position.
+    function parseTerminals(text) {
+        var lines = text.split("\n").filter(function (l) { return l.trim() !== ""; });
+        if (lines.length < 2)
+            return [];
+        var head = lines[0].split("\t");
+        var rows = [];
+        for (var i = 1; i < lines.length; i++) {
+            var cells = lines[i].split("\t");
+            var row = {};
+            for (var c = 0; c < head.length; c++)
+                row[head[c]] = cells[c] === undefined ? "" : cells[c];
+            rows.push(row);
+        }
+        return rows;
+    }
+
+    Process {
+        id: termLister
+        running: true
+        command: [root.termHelper, "list"]
+        stdout: StdioCollector {
+            onStreamFinished: root.terminals = root.parseTerminals(this.text)
+        }
+    }
+
+    Process {
+        id: termCurrent
+        running: true
+        command: [root.termHelper, "current"]
+        stdout: StdioCollector {
+            onStreamFinished: root.currentTerminal = this.text.trim()
+        }
+    }
+
+    Process {
+        id: termApplier
+        // Unlike a waybar switch this changes nothing already on screen — it only decides
+        // what the next SUPER+Q opens — so there is no restart to wait for and the panel
+        // closes as soon as the write lands.
+        onExited: Qt.quit()
+    }
+
+    function applyTerminal(exec) {
+        root.error = "";
+        picker.visible = false;
+        termApplier.command = [root.termHelper, "apply", exec];
+        termApplier.running = true;
+    }
+
     // The island is a separate long-lived process, so the panel reports and flips it
     // rather than owning it — closing the panel must not take the island down with it.
     property bool islandRunning: false
@@ -216,6 +272,9 @@ ShellRoot {
         onApplyRequested: function (name) { root.apply(name); }
         islandRunning: root.islandRunning
         onIslandToggleRequested: islandToggle.running = true
+        terminals: root.terminals
+        currentTerminal: root.currentTerminal
+        onTerminalRequested: function (exec) { root.applyTerminal(exec); }
         onDismissed: Qt.quit()
     }
 }

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# What terminal emulators this machine offers, and which one Hyprland should open.
+#
+# Discovered from XDG desktop entries rather than a hardcoded list, so a terminal
+# installed later shows up without editing anything. The rules, each of which excludes
+# something real on this machine:
+#
+#   * TerminalEmulator must be in the Categories *key*. Matching the word anywhere in the
+#     file also catches xfce4-terminal-emulator.desktop, whose Exec mentions it while its
+#     categories say Utility — it is a meta-launcher, not a terminal.
+#   * NoDisplay=true is skipped. That is what marks GNOME's "Terminal Preferences", which
+#     otherwise looks like a terminal because it carries the category and runs
+#     gnome-terminal --preferences.
+#   * Only the [Desktop Entry] group is read. Desktop Actions further down have their own
+#     Name and Exec, so parsing the whole file turns gnome-terminal into three terminals
+#     called Terminal, New Window and Preferences.
+#   * TryExec, or the first word of Exec, must actually resolve. A keybind naming a binary
+#     that is not installed fails silently — the bug launch_first_available.sh exists for.
+#
+# Hyprland resolves $terminal at parse time, so the choice cannot live in hyprland.conf
+# and be changed while the session runs. It lives in a state file that terminal.sh reads
+# at every launch instead, which is the same shape waybar-launch.sh uses for the theme,
+# and for the same reason: ~/.config/hypr is a folded symlink into the dotfiles repo, so
+# writing the choice there would show up as a dirty tree.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hypr"
+STATE_FILE="$STATE_DIR/terminal"
+DIRS=("$HOME/.local/share/applications" /usr/share/applications)
+
+die() { printf 'hypr-terminal: %s\n' "$1" >&2; exit 1; }
+
+# id<TAB>name<TAB>exec for one desktop file, or nothing if it is not a terminal.
+entry_of() {
+    # Split on the FIRST "=" only. Using awk -F= throws away every later one, which
+    # silently turned Ghostty's `--gtk-single-instance=true` into two arguments.
+    awk '
+        /^\[/ { ingroup = ($0 == "[Desktop Entry]"); next }
+        !ingroup { next }
+        {
+            eq = index($0, "=")
+            if (eq == 0) next
+            key = substr($0, 1, eq - 1)
+            val = substr($0, eq + 1)
+        }
+        key == "Name"       && name    == "" { name = val }
+        key == "Exec"       && exec    == "" { exec = val }
+        key == "TryExec"    && tryexec == "" { tryexec = val }
+        key == "NoDisplay"  && val == "true" { hidden = 1 }
+        key == "Hidden"     && val == "true" { hidden = 1 }
+        key == "Categories" && val ~ /(^|;)TerminalEmulator(;|$)/ { isterm = 1 }
+        END {
+            if (!isterm || hidden || name == "" || exec == "") exit 0
+            gsub(/%[a-zA-Z]/, "", exec)                 # field codes mean nothing here
+            gsub(/[ \t]+$/, "", exec)
+            print name "\t" exec "\t" tryexec
+        }
+    ' "$1"
+}
+
+runnable() {   # $1 = exec line, $2 = TryExec
+    local probe=${2:-}
+    if [ -z "$probe" ]; then
+        # The first word, unless the line is a shell wrapper — then trust TryExec or the
+        # shell itself, since the real binary is inside the quoted script.
+        read -r probe _ <<< "$1"
+    fi
+    command -v "$probe" >/dev/null 2>&1
+}
+
+cmd_list() {
+    printf 'id\tname\texec\n'
+    local seen=" " d f id rest name exec tryexec
+    for d in "${DIRS[@]}"; do        # user entries first, so they win the id
+        [ -d "$d" ] || continue
+        for f in "$d"/*.desktop; do
+            [ -e "$f" ] || continue
+            id=${f##*/}
+            case "$seen" in *" $id "*) continue ;; esac
+            rest=$(entry_of "$f") || continue
+            [ -n "$rest" ] || continue
+            IFS=$'\t' read -r name exec tryexec <<< "$rest"
+            runnable "$exec" "$tryexec" || continue
+            seen="$seen$id "
+            printf '%s\t%s\t%s\n' "${id%.desktop}" "$name" "$exec"
+        done
+    done
+}
+
+cmd_current() {
+    if [ -r "$STATE_FILE" ]; then
+        local v; v=$(head -n1 "$STATE_FILE")
+        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    fi
+    printf '\n'          # nothing chosen yet; terminal.sh falls back on its own
+}
+
+cmd_apply() {
+    local exec=${1:-}
+    [ -n "$exec" ] || die "apply needs a command"
+
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$exec" > "$STATE_FILE"
+
+    # Apps that spawn $TERMINAL rather than asking Hyprland get the new one too, but only
+    # when they start after this point — nothing already running notices.
+    if command -v hyprctl >/dev/null; then
+        local first; read -r first _ <<< "$exec"
+        hyprctl keyword env "TERMINAL,$first" >/dev/null 2>&1 || true
+    fi
+
+    if command -v notify-send >/dev/null; then
+        notify-send -h "string:x-dunst-stack-tag:hypr-terminal" -t 1500 -u low \
+            "Terminal" "$exec" || true
+    fi
+}
+
+case "${1:-list}" in
+    list)    cmd_list ;;
+    current) cmd_current ;;
+    apply)   shift; cmd_apply "$@" ;;
+    *)       die "usage: hypr-terminal [list|current|apply <command>]" ;;
+esac

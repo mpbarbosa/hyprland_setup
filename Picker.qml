@@ -14,13 +14,17 @@ PanelWindow {
     required property string error
 
     required property bool islandRunning
+    required property var terminals
+    required property string currentTerminal
 
     signal applyRequested(string name)
+    signal terminalRequested(string exec)
     signal islandToggleRequested()
     signal dismissed()
 
     property int selection: 0
     property string query: ""
+    property string page: "setups"          // "setups" | "terminals"
 
     // Row geometry lives here rather than in the delegate because the sheet has to size
     // itself from the model alone. Reading list.contentHeight instead would make the
@@ -30,9 +34,17 @@ PanelWindow {
     readonly property int rowHeight: 62
     readonly property int rowSpacing: 4
 
+    // Both pages are lists of named things, so they share one filter, one selection and
+    // one set of keys; only what Enter does with the result differs.
+    readonly property var items: page === "setups" ? setups : terminals
+
     // Ranked, not just filtered: a plain substring test puts catppuccin above tokyo-night
     // for "tn" and offers no way to type an abbreviation at all.
-    readonly property var filtered: Fuzzy.filter(setups, query, "name")
+    readonly property var filtered: Fuzzy.filter(items, query, "name")
+
+    function activeList() {
+        return page === "setups" ? list : termList;
+    }
 
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
@@ -52,10 +64,12 @@ PanelWindow {
     // destroys a declarative binding to it. So the view is driven imperatively from
     // `selection` instead, and re-driven whenever the model swaps underneath it.
     function syncView() {
-        list.currentIndex = selection;
+        var v = picker.activeList();
+        v.currentIndex = selection;
         Qt.callLater(function () {
-            if (selection >= 0 && selection < list.count)
-                list.positionViewAtIndex(selection, ListView.Contain);
+            var w = picker.activeList();
+            if (selection >= 0 && selection < w.count)
+                w.positionViewAtIndex(selection, ListView.Contain);
         });
     }
 
@@ -68,8 +82,12 @@ PanelWindow {
     }
 
     function activate() {
-        if (selection >= 0 && selection < filtered.length)
+        if (selection < 0 || selection >= filtered.length)
+            return;
+        if (page === "setups")
             picker.applyRequested(filtered[selection].name);
+        else
+            picker.terminalRequested(filtered[selection].exec);
     }
 
     // With no query, the running setup is the meaningful place to start. Once something
@@ -81,7 +99,9 @@ PanelWindow {
         var target = 0;
         if (query === "") {
             for (var i = 0; i < filtered.length; i++) {
-                if (filtered[i].name === current) {
+                var hit = page === "setups" ? filtered[i].name === current
+                                            : filtered[i].exec === currentTerminal;
+                if (hit) {
                     target = i;
                     break;
                 }
@@ -93,6 +113,7 @@ PanelWindow {
 
     onFilteredChanged: resetSelection()
     onCurrentChanged: resetSelection()
+    onPageChanged: resetSelection()
 
     // Dimming the desktop is what makes the overlay read as modal; without it the sheet
     // looks like a window that merely happens to be on top.
@@ -116,7 +137,7 @@ PanelWindow {
         // and the two gaps between them. Guessing high here leaves dead space under a
         // short filtered list.
         height: Math.min(picker.height - 140,
-                         118 + 58 + Math.max(picker.rowHeight,
+                         118 + 58 + 38 + Math.max(picker.rowHeight,
                                         picker.filtered.length * (picker.rowHeight + picker.rowSpacing) - picker.rowSpacing))
         radius: 14
         color: picker.uiColors["ground-solid"]
@@ -137,7 +158,7 @@ PanelWindow {
 
                 Text {
                     id: title
-                    text: "Waybar setup"
+                    text: "Hyprland setup"
                     color: picker.uiColors.ink
                     font.family: "Hack Nerd Font"
                     font.pixelSize: 17
@@ -147,10 +168,53 @@ PanelWindow {
                 Text {
                     anchors.right: parent.right
                     anchors.baseline: title.baseline
-                    text: picker.setups.length + " available · " + picker.current + " live"
+                    text: picker.page === "setups"
+                          ? picker.setups.length + " setups · " + picker.current + " live"
+                          : picker.terminals.length + " terminals installed"
                     color: picker.uiColors["ink-muted"]
                     font.family: "Hack Nerd Font"
                     font.pixelSize: 11
+                }
+            }
+
+            // Two pages rather than one longer list: a terminal is not a waybar setup, and
+            // the rows carry different things. Tab moves between them so the panel stays
+            // reachable without the mouse.
+            Row {
+                spacing: 6
+
+                Repeater {
+                    model: [
+                        { key: "setups",    label: "Waybar" },
+                        { key: "terminals", label: "Terminal" }
+                    ]
+
+                    Rectangle {
+                        required property var modelData
+                        readonly property bool on: picker.page === modelData.key
+
+                        width: tabText.implicitWidth + 24
+                        height: 26
+                        radius: 13
+                        color: on ? Qt.alpha(picker.uiColors.accent, 0.20)
+                                  : tabHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.07)
+                                                     : "transparent"
+                        border.width: 1
+                        border.color: on ? Qt.alpha(picker.uiColors.accent, 0.55)
+                                         : Qt.alpha(picker.uiColors["ink-faint"], 0.3)
+
+                        HoverHandler { id: tabHover }
+                        TapHandler { onTapped: picker.page = modelData.key }
+
+                        Text {
+                            id: tabText
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: parent.on ? picker.uiColors.ink : picker.uiColors["ink-muted"]
+                            font.family: "Hack Nerd Font"
+                            font.pixelSize: 12
+                        }
+                    }
                 }
             }
 
@@ -181,6 +245,7 @@ PanelWindow {
                     Keys.onEscapePressed: picker.dismissed()
                     // The rest of this panel is driven from the keyboard, so the island
                     // row is too rather than being the one mouse-only control in it.
+                    Keys.onTabPressed: picker.page = (picker.page === "setups" ? "terminals" : "setups")
                     Keys.onPressed: function (event) {
                         if (event.key === Qt.Key_I && (event.modifiers & Qt.ControlModifier)) {
                             picker.islandToggleRequested();
@@ -206,7 +271,11 @@ PanelWindow {
                 height: parent.height - y - islandRow.height - parent.spacing
                 clip: true
                 spacing: picker.rowSpacing
-                model: picker.filtered
+                visible: picker.page === "setups"
+                // The hidden page gets an empty model rather than the shared one: a
+                // SetupCard handed a terminal row would bind against colours it has not
+                // got, and fill the log with it.
+                model: picker.page === "setups" ? picker.filtered : []
                 boundsBehavior: Flickable.StopAtBounds
 
                 // The list arrives after the window does, so the view has to be re-pointed
@@ -226,6 +295,37 @@ PanelWindow {
                     active: modelData.name === picker.current
                     selected: index === picker.selection
                     onClicked: picker.applyRequested(modelData.name)
+                }
+            }
+
+            ListView {
+                id: termList
+                width: parent.width
+                // Same expression as the setups list rather than a reference to it: an
+                // invisible Column child keeps its last y, so borrowing its height would
+                // size this from wherever the other list happened to stop being shown.
+                height: parent.height - y - islandRow.height - parent.spacing
+                clip: true
+                spacing: picker.rowSpacing
+                visible: picker.page === "terminals"
+                model: picker.page === "terminals" ? picker.filtered : []
+                boundsBehavior: Flickable.StopAtBounds
+
+                onCountChanged: Qt.callLater(picker.syncView)
+                onHeightChanged: Qt.callLater(picker.syncView)
+                Component.onCompleted: Qt.callLater(picker.syncView)
+
+                delegate: TerminalCard {
+                    required property var modelData
+                    required property int index
+
+                    width: termList.width
+                    height: picker.rowHeight
+                    terminal: modelData
+                    uiColors: picker.uiColors
+                    active: modelData.exec === picker.currentTerminal
+                    selected: index === picker.selection
+                    onClicked: picker.terminalRequested(modelData.exec)
                 }
             }
 
@@ -317,7 +417,7 @@ PanelWindow {
         anchors.horizontalCenter: sheet.horizontalCenter
         anchors.top: sheet.bottom
         anchors.topMargin: 10
-        text: "↑↓ move · Enter apply · Ctrl+I island · Esc cancel"
+        text: "↑↓ move · Tab page · Enter apply · Ctrl+I island · Esc cancel"
         color: Qt.alpha(picker.uiColors.ink, 0.55)
         font.family: "Hack Nerd Font"
         font.pixelSize: 11

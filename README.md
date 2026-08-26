@@ -2,7 +2,8 @@
 
 A GUI for Hyprland setup, implemented in [quickshell](https://quickshell.outfoxxed.me/).
 
-Right now it covers one thing: choosing which waybar setup is live.
+Two pages, switched with `Tab`: which waybar setup is live, and which terminal emulator
+Hyprland opens.
 
 ![The picker](docs/picker.png)
 
@@ -41,7 +42,8 @@ Running it again closes it, so it behaves as a toggle when bound to a key. In Hy
 bindd = $mainMod SHIFT, T, Waybar setup, exec, ~/Documents/GitHub/hyprland_setup/bin/waybar-setup-gui
 ```
 
-`↑` `↓` move, `Enter` applies, `Ctrl+I` toggles the island, `Esc` cancels. Clicking a row applies it; clicking outside
+`↑` `↓` move, `Tab` switches page, `Enter` applies, `Ctrl+I` toggles the island, `Esc`
+cancels. Clicking a row applies it; clicking outside
 cancels.
 
 Typing ranks rather than merely filters, and knows the names are kebab-case, so `tn` finds
@@ -50,6 +52,31 @@ contain one.
 
 Applying writes the chosen name to `$XDG_STATE_HOME/waybar/theme` and restarts the bar, so
 the choice survives a relogin.
+
+## Terminals
+
+The terminals page lists what this machine actually offers, discovered from XDG desktop
+entries rather than a hardcoded list, so one installed later appears without editing
+anything. Four rules keep it honest, and each excludes something real:
+
+| rule | what it drops |
+| --- | --- |
+| `TerminalEmulator` must be in the `Categories` *key* | xfce's meta-launcher, which only mentions it in `Exec` |
+| `NoDisplay=true` is skipped | GNOME's "Terminal Preferences" |
+| only the `[Desktop Entry]` group is read | gnome-terminal's actions, which would appear as three terminals |
+| `TryExec`, or `Exec`'s first word, must resolve | anything with a desktop entry but no binary |
+
+Hyprland freezes `$terminal` at parse time, so the choice cannot live in `hyprland.conf`
+and still change while the session runs. It goes to `$XDG_STATE_HOME/hypr/terminal`, and
+`hypr/scripts/terminal.sh` reads it at every launch — the same shape `waybar-launch.sh`
+uses for the theme, and for the same reason: writing into `~/.config/hypr` would dirty the
+dotfiles repo on every switch.
+
+```bash
+./scripts/hypr-terminal list        # what is installed, as TSV
+./scripts/hypr-terminal current     # what SUPER+Q will open
+./scripts/hypr-terminal apply kitty
+```
 
 ## Dynamic island
 
@@ -96,7 +123,8 @@ hand — trusting it would mark the wrong row as live.
 | --- | --- |
 | `shell.qml` | entry point; owns every process call and all CSS parsing |
 | `Picker.qml` | the overlay window, filtering and keyboard handling |
-| `SetupCard.qml` | one row |
+| `SetupCard.qml` | one row of the waybar page |
+| `TerminalCard.qml` | one row of the terminals page |
 | `BarPreview.qml` | the miniature bar |
 | `island.qml` | the island's entry point; sources, state and window |
 | `IslandPill.qml` | the pill that morphs |
@@ -104,6 +132,7 @@ hand — trusting it would mark the wrong row as live.
 | `modules/common/Fuzzy.qml` | ranking for the filter |
 | `modules/common/PickerState.qml` | the cache, as a `FileView` + `JsonAdapter` |
 | `scripts/waybar-setup` | discovery, colour resolution, applying |
+| `scripts/hypr-terminal` | terminal discovery and choice |
 | `bin/waybar-setup-gui` | toggling launcher |
 
 QML only ever sees resolved values; paths, processes and CSS stop at `shell.qml`.
