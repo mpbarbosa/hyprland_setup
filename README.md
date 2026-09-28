@@ -3,7 +3,8 @@
 A GUI for Hyprland setup, implemented in [quickshell](https://quickshell.outfoxxed.me/).
 
 Two pages, switched with `Tab`: which waybar setup is live, and which terminal emulator
-Hyprland opens.
+Hyprland opens. Below them are switches for the dynamic island and for window shadow and
+blur.
 
 ![The picker](docs/picker.png)
 
@@ -42,8 +43,8 @@ Running it again closes it, so it behaves as a toggle when bound to a key. In Hy
 bindd = $mainMod SHIFT, T, Waybar setup, exec, ~/Documents/GitHub/hyprland_setup/bin/waybar-setup-gui
 ```
 
-`↑` `↓` move, `Tab` switches page, `Enter` applies, `Ctrl+I` toggles the island, `Esc`
-cancels. Clicking a row applies it; clicking outside
+`↑` `↓` move, `Tab` switches page, `Enter` applies, `Ctrl+I` toggles the island, `Ctrl+S`
+and `Ctrl+B` toggle window shadow and blur, `Esc` cancels. Clicking a row applies it; clicking outside
 cancels.
 
 Typing ranks rather than merely filters, and knows the names are kebab-case, so `tn` finds
@@ -102,6 +103,30 @@ Nothing starts it at login yet. Add one line if you want it always on:
 exec-once = ~/Documents/GitHub/hyprland_setup/bin/island start
 ```
 
+## Window effects
+
+The `Window effects` row switches Hyprland's window shadow and blur for every window,
+whatever setup is live. `Ctrl+S` and `Ctrl+B` do the same from the keyboard.
+
+```bash
+./scripts/hypr-effects status        # what you asked for, as TSV
+./scripts/hypr-effects toggle blur   # also: set shadow on|off
+./scripts/hypr-effects restore       # re-apply the saved choice
+```
+
+The choice goes to `$XDG_STATE_HOME/hypr/effects`, not into the Hyprland config. A config
+write triggers an autoreload, and a reload drops the theme colours `theme-apply.sh` pushed
+in at runtime. The file only survives a reload because the dotfiles run `restore` from an
+`exec =` line, which runs after every reload rather than once at login:
+
+```
+exec = sh -c 'test -x ~/Documents/GitHub/hyprland_setup/scripts/hypr-effects && ~/Documents/GitHub/hyprland_setup/scripts/hypr-effects restore'
+```
+
+Performance mode (`SUPER+SHIFT+P`) still turns both off. A switch flipped while it is on
+is saved and applies when it ends. An effect never flipped here is not in the file, so it
+follows `conf.d/appearance.conf`.
+
 ## Without the GUI
 
 Everything the GUI knows comes from one script, which is usable on its own — and is the
@@ -133,6 +158,7 @@ hand — trusting it would mark the wrong row as live.
 | `modules/common/PickerState.qml` | the cache, as a `FileView` + `JsonAdapter` |
 | `scripts/waybar-setup` | discovery, colour resolution, applying |
 | `scripts/hypr-terminal` | terminal discovery and choice |
+| `scripts/hypr-effects` | window shadow and blur, and restoring them after a reload |
 | `bin/waybar-setup-gui` | toggling launcher |
 
 QML only ever sees resolved values; paths, processes and CSS stop at `shell.qml`.

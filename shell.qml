@@ -14,6 +14,7 @@ ShellRoot {
     readonly property string helper: Qt.resolvedUrl("scripts/waybar-setup").toString().replace(/^file:\/\//, "")
     readonly property string islandBin: Qt.resolvedUrl("bin/island").toString().replace(/^file:\/\//, "")
     readonly property string termHelper: Qt.resolvedUrl("scripts/hypr-terminal").toString().replace(/^file:\/\//, "")
+    readonly property string effectsHelper: Qt.resolvedUrl("scripts/hypr-effects").toString().replace(/^file:\/\//, "")
 
     property var setups: []
     property string current: "default"
@@ -232,6 +233,42 @@ ShellRoot {
         onTriggered: islandStatus.running = true
     }
 
+    // Shadow and blur. Unlike a setup or a terminal, flipping one changes nothing that needs
+    // the panel out of the way, so it stays open and the switch just follows the answer.
+    property var effects: ({ "shadow": true, "blur": true })
+
+    Process {
+        id: effectsStatus
+        running: true
+        command: [root.effectsHelper, "status"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var rows = root.parseTerminals(this.text);   // same header-led TSV
+                var next = {};
+                for (var i = 0; i < rows.length; i++)
+                    next[rows[i].name] = rows[i].enabled === "1";
+                root.effects = next;
+            }
+        }
+    }
+
+    Process {
+        id: effectsToggle
+        stderr: StdioCollector {
+            onStreamFinished: if (this.text.trim() !== "") root.error = this.text.trim()
+        }
+        // Re-ask rather than flip locally, for the island's reason: the helper is the one
+        // that knows whether the change landed.
+        onExited: effectsStatus.running = true
+    }
+
+    function toggleEffect(name) {
+        if (effectsToggle.running)
+            return;
+        effectsToggle.command = [root.effectsHelper, "toggle", name];
+        effectsToggle.running = true;
+    }
+
     Process {
         id: applier
         stderr: StdioCollector {
@@ -272,6 +309,8 @@ ShellRoot {
         onApplyRequested: function (name) { root.apply(name); }
         islandRunning: root.islandRunning
         onIslandToggleRequested: islandToggle.running = true
+        effects: root.effects
+        onEffectToggleRequested: function (name) { root.toggleEffect(name); }
         terminals: root.terminals
         currentTerminal: root.currentTerminal
         onTerminalRequested: function (exec) { root.applyTerminal(exec); }

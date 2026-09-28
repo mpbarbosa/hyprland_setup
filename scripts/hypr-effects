@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Window shadow and blur: report them, flip them, and put them back after a reload.
+#
+# The choice cannot live in Hyprland's config. ~/.config/hypr is a folded symlink into
+# the dotfiles repo, so writing there dirties the tree, and even the gitignored custom/
+# layer is no good: Hyprland autoreloads on a config write, and a reload re-reads the base
+# palette, which throws away the theme colours theme-apply.sh pushed in at runtime.
+#
+# So it is a state file plus `hyprctl keyword`, and `restore` re-applies the file. The
+# dotfiles run `restore` with `exec =` rather than `exec-once =`, so it runs after every
+# reload as well as at login. That includes the reload perf-mode.sh uses to come back out
+# of performance mode.
+#
+# Only effects that have been flipped here are in the file. Anything else follows
+# conf.d/appearance.conf, so turning an effect off there is not overridden by a stale
+# "on" from here.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hypr"
+STATE_FILE="$STATE_DIR/effects"
+EFFECTS=(shadow blur)
+
+die() { printf 'hypr-effects: %s\n' "$1" >&2; exit 1; }
+
+key_of() {
+    case "$1" in
+        shadow) echo decoration:shadow:enabled ;;
+        blur)   echo decoration:blur:enabled ;;
+        *)      die "unknown effect: $1 (expected: ${EFFECTS[*]})" ;;
+    esac
+}
+
+live() { hyprctl getoption "$(key_of "$1")" -j | sed -n 's/.*"int": *\([0-9]*\).*/\1/p'; }
+
+# perf-mode.sh's own sentinel. While it holds, blur and shadow are off on purpose, and
+# forcing one back on underneath it would undo the mode.
+perf_mode_on() { [ "$(hyprctl getoption animations:enabled -j | sed -n 's/.*"int": *\([0-9]*\).*/\1/p')" = "0" ]; }
+
+stored() { [ -r "$STATE_FILE" ] && sed -n "s/^$1=\([01]\)$/\1/p" "$STATE_FILE" | tail -n1 || true; }
+
+# What the user asked for. That can differ from what is live, because performance mode
+# turns both effects off without touching this file.
+wanted() {
+    local v; v=$(stored "$1")
+    if [ -n "$v" ]; then echo "$v"; else live "$1"; fi
+}
+
+cmd_status() {
+    printf 'name\tenabled\n'
+    local e
+    for e in "${EFFECTS[@]}"; do
+        printf '%s\t%s\n' "$e" "$(wanted "$e")"
+    done
+}
+
+cmd_set() {
+    local name=${1:-} value=${2:-}
+    key_of "$name" >/dev/null
+    case "$value" in 1|0) ;; on) value=1 ;; off) value=0 ;; *) die "set needs on or off" ;; esac
+
+    mkdir -p "$STATE_DIR"
+    local tmp; tmp=$(mktemp "$STATE_FILE.XXXXXX")
+    { [ -r "$STATE_FILE" ] && grep -v "^$name=" "$STATE_FILE" || true; echo "$name=$value"; } > "$tmp"
+    mv "$tmp" "$STATE_FILE"
+
+    # In performance mode the choice is recorded but not applied. It applies when the mode
+    # ends, since that reload runs `restore`.
+    perf_mode_on || hyprctl keyword "$(key_of "$name")" "$value" >/dev/null
+}
+
+cmd_toggle() {
+    local name=${1:-}
+    key_of "$name" >/dev/null
+    if [ "$(wanted "$name")" = "1" ]; then cmd_set "$name" 0; else cmd_set "$name" 1; fi
+}
+
+cmd_restore() {
+    [ -r "$STATE_FILE" ] || return 0
+    perf_mode_on && return 0
+    local e v batch=""
+    for e in "${EFFECTS[@]}"; do
+        v=$(stored "$e")
+        [ -n "$v" ] && batch+="keyword $(key_of "$e") $v ; "
+    done
+    [ -n "$batch" ] && hyprctl --batch "$batch" >/dev/null
+    return 0
+}
+
+case "${1:-status}" in
+    status)  cmd_status ;;
+    set)     shift; cmd_set "$@" ;;
+    toggle)  shift; cmd_toggle "$@" ;;
+    restore) cmd_restore ;;
+    *)       die "usage: hypr-effects [status|set <effect> on|off|toggle <effect>|restore]" ;;
+esac

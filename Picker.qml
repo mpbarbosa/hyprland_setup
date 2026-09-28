@@ -14,12 +14,14 @@ PanelWindow {
     required property string error
 
     required property bool islandRunning
+    required property var effects           // { shadow: bool, blur: bool }
     required property var terminals
     required property string currentTerminal
 
     signal applyRequested(string name)
     signal terminalRequested(string exec)
     signal islandToggleRequested()
+    signal effectToggleRequested(string name)
     signal dismissed()
 
     property int selection: 0
@@ -134,10 +136,11 @@ PanelWindow {
         anchors.centerIn: parent
         width: 460
         // 118 is the chrome above the list: 2x16 margins, the title row, the search field
-        // and the two gaps between them. Guessing high here leaves dead space under a
-        // short filtered list.
+        // and the two gaps between them. 58 and 50 are the island and effects rows below
+        // it, each with its gap. Guessing high here leaves dead space under a short
+        // filtered list.
         height: Math.min(picker.height - 140,
-                         118 + 58 + 38 + Math.max(picker.rowHeight,
+                         118 + 58 + 50 + 38 + Math.max(picker.rowHeight,
                                         picker.filtered.length * (picker.rowHeight + picker.rowSpacing) - picker.rowSpacing))
         radius: 14
         color: picker.uiColors["ground-solid"]
@@ -247,10 +250,17 @@ PanelWindow {
                     // row is too rather than being the one mouse-only control in it.
                     Keys.onTabPressed: picker.page = (picker.page === "setups" ? "terminals" : "setups")
                     Keys.onPressed: function (event) {
-                        if (event.key === Qt.Key_I && (event.modifiers & Qt.ControlModifier)) {
+                        if (!(event.modifiers & Qt.ControlModifier))
+                            return;
+                        if (event.key === Qt.Key_I)
                             picker.islandToggleRequested();
-                            event.accepted = true;
-                        }
+                        else if (event.key === Qt.Key_S)
+                            picker.effectToggleRequested("shadow");
+                        else if (event.key === Qt.Key_B)
+                            picker.effectToggleRequested("blur");
+                        else
+                            return;
+                        event.accepted = true;
                     }
 
                     Text {
@@ -266,9 +276,10 @@ PanelWindow {
             ListView {
                 id: list
                 width: parent.width
-                // Leaves room for the island row below; without subtracting it the list
-                // claims the remainder and the row is laid out past the sheet's edge.
-                height: parent.height - y - islandRow.height - parent.spacing
+                // Leaves room for the island and effects rows below; without subtracting
+                // them the list claims the remainder and the rows are laid out past the
+                // sheet's edge.
+                height: parent.height - y - islandRow.height - effectsRow.height - 2 * parent.spacing
                 clip: true
                 spacing: picker.rowSpacing
                 visible: picker.page === "setups"
@@ -304,7 +315,7 @@ PanelWindow {
                 // Same expression as the setups list rather than a reference to it: an
                 // invisible Column child keeps its last y, so borrowing its height would
                 // size this from wherever the other list happened to stop being shown.
-                height: parent.height - y - islandRow.height - parent.spacing
+                height: parent.height - y - islandRow.height - effectsRow.height - 2 * parent.spacing
                 clip: true
                 spacing: picker.rowSpacing
                 visible: picker.page === "terminals"
@@ -326,6 +337,94 @@ PanelWindow {
                     active: modelData.exec === picker.currentTerminal
                     selected: index === picker.selection
                     onClicked: picker.terminalRequested(modelData.exec)
+                }
+            }
+
+            // Compositor effects, which apply to every window whatever setup is live. Two
+            // switches in one row rather than a row each, so the list keeps its height.
+            // Performance mode turns both off regardless. These show what you asked for,
+            // and a change made while that mode is on applies when it ends.
+            Rectangle {
+                id: effectsRow
+                width: parent.width
+                height: 38
+                radius: 8
+                color: "transparent"
+                border.width: 1
+                border.color: Qt.alpha(picker.uiColors["ink-faint"], 0.35)
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 12
+                    text: "Window effects"
+                    color: picker.uiColors.ink
+                    font.family: "Hack Nerd Font"
+                    font.pixelSize: 13
+                }
+
+                Row {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    spacing: 4
+
+                    Repeater {
+                        model: [
+                            { key: "shadow", label: "Shadow" },
+                            { key: "blur",   label: "Blur" }
+                        ]
+
+                        Rectangle {
+                            id: chip
+                            required property var modelData
+                            readonly property bool on: picker.effects[modelData.key] === true
+
+                            width: chipRow.implicitWidth + 16
+                            height: 28
+                            radius: 6
+                            color: chipHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.06) : "transparent"
+
+                            HoverHandler { id: chipHover }
+                            TapHandler { onTapped: picker.effectToggleRequested(chip.modelData.key) }
+
+                            Row {
+                                id: chipRow
+                                anchors.centerIn: parent
+                                spacing: 8
+
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: chip.modelData.label
+                                    color: chip.on ? picker.uiColors.ink : picker.uiColors["ink-muted"]
+                                    font.family: "Hack Nerd Font"
+                                    font.pixelSize: 12
+                                }
+
+                                // The island's switch at a smaller size, so the three read as
+                                // the same kind of control.
+                                Rectangle {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 34
+                                    height: 18
+                                    radius: height / 2
+                                    color: chip.on ? picker.uiColors["accent-alt"]
+                                                   : Qt.alpha(picker.uiColors["ink-faint"], 0.35)
+                                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                                    Rectangle {
+                                        width: 12
+                                        height: 12
+                                        radius: 6
+                                        y: 3
+                                        x: chip.on ? parent.width - width - 3 : 3
+                                        color: picker.uiColors["ground-solid"]
+                                        Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -417,7 +516,7 @@ PanelWindow {
         anchors.horizontalCenter: sheet.horizontalCenter
         anchors.top: sheet.bottom
         anchors.topMargin: 10
-        text: "↑↓ move · Tab page · Enter apply · Ctrl+I island · Esc cancel"
+        text: "↑↓ move · Tab page · Enter apply · Ctrl+I island · Ctrl+S shadow · Ctrl+B blur · Esc cancel"
         color: Qt.alpha(picker.uiColors.ink, 0.55)
         font.family: "Hack Nerd Font"
         font.pixelSize: 11
