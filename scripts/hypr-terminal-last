@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# Open the chosen terminal where the last one was, and remember where this one ends up.
+#
+# SUPER+Q opens a terminal wherever the layout decides to put it. This is the other key,
+# SUPER+SHIFT+Q: a floating terminal that comes back at the position and size the previous
+# one had. That only works if something records the geometry while the window is alive,
+# because by the time a window closes there is nothing left to read it from.
+#
+# Hyprland cannot do it alone here. This build (0.56.2) has no `persistentsize` rule —
+# `strings` on the binary finds no such name — and a window rule could not carry the
+# position across a relogin anyway: rules are config, and ~/.config/hypr is a folded
+# symlink into the dotfiles repo, so the geometry has to be state. Same reason
+# hypr-terminal keeps the terminal *choice* in a state file.
+#
+# Three decisions worth the words:
+#
+#   * The new window is found by diffing `hyprctl clients`, not by handing Hyprland
+#     `exec [float;move ...]` rules. Those are matched against the PID Hyprland spawned,
+#     and a single-instance terminal maps its window from the process already running —
+#     ghostty's desktop entry on this machine passes --gtk-single-instance=true — so the
+#     rules would land on nothing and the window would come up wherever the layout wanted
+#     it. A diff sees the window whoever created it. The cost is that an unrelated window
+#     mapping in the same 100ms tick would be mistaken for the terminal; the first new
+#     address wins, and the recorder exits with it.
+#   * The geometry is recorded by polling, not from the event socket. Hyprland emits
+#     `movewindowv2` but has no resize event at all, so a socket watcher would remember
+#     where a window was dragged and miss every drag of its edge.
+#   * Only a floating, non-fullscreen window is recorded. A tiled window's geometry
+#     belongs to the layout rather than the user, and restoring a fullscreen box as a
+#     floating window would hand back a window the size of the monitor.
+#
+# What to run comes from hypr/scripts/terminal.sh, so the terminal choice and the
+# fresh-machine fallback keep one owner rather than being re-implemented here.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hypr"
+GEOM_FILE="$STATE_DIR/terminal-geometry"
+PID_FILE="$STATE_DIR/terminal-geometry.pid"
+LAUNCHER="$HOME/.config/hypr/scripts/terminal.sh"
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+SELF="$HERE/$(basename -- "$0")"
+
+POLL=2          # seconds between geometry snapshots while the window lives
+APPEAR_TRIES=50 # 100ms ticks to wait for the window to map
+
+die() { printf 'hypr-terminal-last: %s\n' "$1" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "needs $1"; }
+
+addresses() { hyprctl clients -j | jq -r '.[].address'; }
+
+# "gone" when the window has closed, "skip" while its geometry is the layout's rather
+# than the user's, otherwise "x y w h". One hyprctl call answers both questions, so the
+# recorder's tick costs exactly one process.
+probe() {
+    hyprctl clients -j | jq -r --arg a "$1" '
+        [ .[] | select(.address == $a) ] as $w
+        | if ($w | length) == 0 then "gone"
+          elif ($w[0].floating | not) or $w[0].fullscreen != 0 then "skip"
+          else "\($w[0].at[0]) \($w[0].at[1]) \($w[0].size[0]) \($w[0].size[1])"
+          end'
+}
+
+# Four integers, or nothing. A short or junk file means "never recorded" rather than an
+# error — the dispatchers would otherwise be handed a partial geometry.
+saved() {
+    [ -r "$GEOM_FILE" ] || return 0
+    local line; line=$(head -n1 "$GEOM_FILE")
+    case "$line" in ''|*[!0-9\ -]*) return 0 ;; esac
+    # shellcheck disable=SC2086  # deliberate split: counting the fields
+    set -- $line
+    [ "$#" -eq 4 ] || return 0
+    printf '%s\n' "$line"
+}
+
+record() {
+    mkdir -p "$STATE_DIR"
+    local tmp; tmp=$(mktemp "$GEOM_FILE.XXXXXX")
+    printf '%s\n' "$1" > "$tmp"
+    mv "$tmp" "$GEOM_FILE"
+}
+
+spawn_terminal() {
+    # setsid --fork, never `setsid cmd &`: a shell without job control sets SIGINT to
+    # SIG_IGN for a background job, and SIG_IGN survives execve.
+    if [ -x "$LAUNCHER" ]; then
+        setsid -f "$LAUNCHER" >/dev/null 2>&1
+        return
+    fi
+    # No dotfiles launcher on this machine. Fall back to the choice hypr-terminal keeps,
+    # which is a desktop entry's Exec line and may be a shell wrapper rather than a bare
+    # binary, so it goes to sh -c.
+    local cmd=""
+    [ -x "$HERE/hypr-terminal" ] && cmd=$("$HERE/hypr-terminal" current)
+    [ -n "$cmd" ] || die "no terminal chosen, and no $LAUNCHER to fall back on"
+    setsid -f sh -c "$cmd" >/dev/null 2>&1
+}
+
+apply_geometry() {
+    local addr=$1 geom x y w h
+    geom=$(saved)
+    if [ -z "$geom" ]; then
+        # Nothing remembered yet. Float it and leave the placement to Hyprland; the first
+        # move or resize is what gives the next launch something to restore.
+        hyprctl dispatch setfloating "address:$addr" >/dev/null
+        return
+    fi
+    read -r x y w h <<< "$geom"
+    # Position last: a resize anchors the top-left, so moving afterwards cannot be undone
+    # by it.
+    hyprctl --batch "dispatch setfloating address:$addr ; \
+        dispatch resizewindowpixel exact $w $h,address:$addr ; \
+        dispatch movewindowpixel exact $x $y,address:$addr" >/dev/null
+}
+
+# One recorder at a time: the most recently opened terminal owns the memory, so two
+# restored windows cannot take turns overwriting each other's geometry.
+stop_recorder() {
+    [ -r "$PID_FILE" ] || return 0
+    local pid; pid=$(head -n1 "$PID_FILE")
+    case "$pid" in ''|*[!0-9]*) rm -f "$PID_FILE"; return 0 ;; esac
+    # A PID outlives the process it named, so check whose it is before signalling it.
+    if grep -qa "$(basename -- "$SELF")" "/proc/$pid/cmdline" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+}
+
+cmd_open() {
+    need hyprctl
+    need jq
+    local before after new="" tries=0
+
+    before=$(addresses)
+    spawn_terminal
+
+    while [ "$tries" -lt "$APPEAR_TRIES" ]; do
+        sleep 0.1
+        after=$(addresses)
+        new=$(comm -13 <(printf '%s\n' "$before" | sort) <(printf '%s\n' "$after" | sort) | head -n1)
+        [ -n "$new" ] && break
+        tries=$((tries + 1))
+    done
+    [ -n "$new" ] || die "the terminal opened no window within $((APPEAR_TRIES / 10))s"
+
+    apply_geometry "$new"
+    stop_recorder
+    setsid -f "$SELF" watch "$new" >/dev/null 2>&1
+}
+
+cmd_watch() {
+    local addr=${1:-} last="" cur
+    [ -n "$addr" ] || die "watch needs a window address"
+    need hyprctl
+    need jq
+
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$$" > "$PID_FILE"
+
+    while :; do
+        cur=$(probe "$addr")
+        case "$cur" in
+            gone) break ;;
+            skip) ;;
+            *)
+                if [ "$cur" != "$last" ]; then
+                    record "$cur"
+                    last=$cur
+                fi
+                ;;
+        esac
+        sleep "$POLL"
+    done
+
+    # Only if the file still names this recorder; a newer open has already replaced it.
+    [ "$(head -n1 "$PID_FILE" 2>/dev/null || true)" = "$$" ] && rm -f "$PID_FILE"
+    return 0
+}
+
+cmd_geometry() {
+    printf 'x\ty\twidth\theight\n'
+    local geom x y w h; geom=$(saved)
+    [ -n "$geom" ] || return 0
+    read -r x y w h <<< "$geom"
+    printf '%s\t%s\t%s\t%s\n' "$x" "$y" "$w" "$h"
+}
+
+cmd_forget() {
+    stop_recorder
+    rm -f "$GEOM_FILE"
+}
+
+case "${1:-open}" in
+    open)     cmd_open ;;
+    watch)    shift; cmd_watch "$@" ;;
+    geometry) cmd_geometry ;;
+    forget)   cmd_forget ;;
+    *)        die "usage: hypr-terminal-last [open|geometry|forget]" ;;
+esac

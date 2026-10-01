@@ -79,6 +79,35 @@ dotfiles repo on every switch.
 ./scripts/hypr-terminal apply kitty
 ```
 
+### Where it opens
+
+`SUPER+Q` opens the terminal wherever the layout puts it. `SUPER+SHIFT+Q` opens the same
+one floating, at the position and size the last one had:
+
+```bash
+./scripts/hypr-terminal-last           # open there, and go on recording
+./scripts/hypr-terminal-last geometry  # what is remembered, as TSV
+./scripts/hypr-terminal-last forget    # start over
+```
+
+Nothing in Hyprland remembers either across a relogin — this build has no
+`persistentsize` rule, and a window rule is config rather than state — so the script
+records the geometry while the window lives and replays it on the next open. Three things
+shaped it:
+
+| | |
+| --- | --- |
+| the new window is found by diffing `hyprctl clients` | `exec [float;move ...]` rules are matched on the spawned PID, so they land on nothing for a single-instance terminal — ghostty's entry passes `--gtk-single-instance=true` |
+| the geometry is polled, not watched | Hyprland emits `movewindowv2` but has no resize event at all, so a socket watcher would remember a drag of the window and miss every drag of its edge |
+| only a floating, non-fullscreen window is recorded | a tiled window's geometry is the layout's rather than yours, and a fullscreen box would come back as a window the size of the monitor |
+
+One recorder runs at a time, so the terminal opened most recently owns the memory. The
+bind lives in the dotfiles, beside the plain `SUPER+Q` one:
+
+```
+bindd = $mainMod SHIFT, Q, Terminal at its last position, exec, ~/Documents/GitHub/hyprland_setup/scripts/hypr-terminal-last
+```
+
 ## Dynamic island
 
 A pill under the bar that wakes up when something happens worth a glance — the volume
@@ -158,6 +187,7 @@ hand — trusting it would mark the wrong row as live.
 | `modules/common/PickerState.qml` | the cache, as a `FileView` + `JsonAdapter` |
 | `scripts/waybar-setup` | discovery, colour resolution, applying |
 | `scripts/hypr-terminal` | terminal discovery and choice |
+| `scripts/hypr-terminal-last` | the floating terminal that reopens where it was |
 | `scripts/hypr-effects` | window shadow and blur, and restoring them after a reload |
 | `bin/waybar-setup-gui` | toggling launcher |
 
