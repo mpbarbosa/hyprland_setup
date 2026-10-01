@@ -88,6 +88,7 @@ one floating, at the position and size the last one had:
 ./scripts/hypr-terminal-last           # open there, and go on recording
 ./scripts/hypr-terminal-last geometry  # what is remembered, as TSV
 ./scripts/hypr-terminal-last forget    # start over
+./scripts/hypr-terminal-last fit 2400 180 700 450   # where that box would land today
 ```
 
 Nothing in Hyprland remembers either across a relogin — this build has no
@@ -100,6 +101,20 @@ shaped it:
 | the new window is found by diffing `hyprctl clients` | `exec [float;move ...]` rules are matched on the spawned PID, so they land on nothing for a single-instance terminal — ghostty's entry passes `--gtk-single-instance=true` |
 | the geometry is polled, not watched | Hyprland emits `movewindowv2` but has no resize event at all, so a socket watcher would remember a drag of the window and miss every drag of its edge |
 | only a floating, non-fullscreen window is recorded | a tiled window's geometry is the layout's rather than yours, and a fullscreen box would come back as a window the size of the monitor |
+
+The geometry survives a relogin by itself, being a plain file under `$XDG_STATE_HOME`: the
+recorder dies with the session and leaves nothing behind but a stale pid file, which the
+next open steps over rather than signalling a recycled stranger. What does not survive is
+the *monitor*. Park the terminal on an external, relogin undocked, and the saved position
+is still valid arithmetic — and Hyprland does not clamp it, so a restore to `x=2400` on
+this 1536-wide panel lands at `x=2400`, reachable only through `hyprctl`.
+
+So a box is restored verbatim only while it leaves at least a 200x100 patch on one monitor
+and fits inside it; otherwise it is capped and pulled in, onto the monitor it overlaps most
+or the focused one when it overlaps none. A window deliberately hanging off an edge keeps
+hanging off it, and one whose monitor is gone comes back on a monitor that exists. `fit`
+answers that arithmetic without plugging anything in, which is how the docked and
+rotated-90° cases were checked.
 
 One recorder runs at a time, so the terminal opened most recently owns the memory. The
 bind lives in the dotfiles, beside the plain `SUPER+Q` one:

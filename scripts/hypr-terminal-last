@@ -43,6 +43,8 @@ SELF="$HERE/$(basename -- "$0")"
 
 POLL=2          # seconds between geometry snapshots while the window lives
 APPEAR_TRIES=50 # 100ms ticks to wait for the window to map
+MIN_VISIBLE_W=200
+MIN_VISIBLE_H=100
 
 die() { printf 'hypr-terminal-last: %s\n' "$1" >&2; exit 1; }
 
@@ -97,6 +99,52 @@ spawn_terminal() {
     setsid -f sh -c "$cmd" >/dev/null 2>&1
 }
 
+# The remembered box can belong to a monitor that is no longer there: park the terminal on
+# the external, relogin undocked, and the position is still valid arithmetic. Hyprland does
+# not clamp it — verified, a restore to x=2400 on this 1536-wide panel lands at x=2400 and
+# stays reachable only through `hyprctl` — so an off-screen window would be the one thing
+# the memory got wrong across a relogin.
+#
+# A box is restored verbatim as long as it puts a patch of at least MIN_VISIBLE_W x
+# MIN_VISIBLE_H on one monitor and is no larger than that monitor, so a window deliberately
+# hanging off an edge keeps hanging off it. Otherwise it is capped and pulled inside the
+# monitor it overlaps most, or the focused one when it overlaps none.
+#
+# Monitor sizes are divided by the scale, since `hyprctl monitors` reports physical pixels
+# while the layout the window lives in is logical — 1920/1.25 is the 1536 a maximised
+# window here actually gets. An odd `transform` has the two swapped.
+fit_to_monitors() {
+    hyprctl monitors -j | jq -r \
+        --argjson g "[$1,$2,$3,$4]" \
+        --argjson min "[$MIN_VISIBLE_W,$MIN_VISIBLE_H]" '
+        [ .[] | {
+            x: .x, y: .y,
+            w: ((if (.transform % 2) == 1 then .height else .width end) / .scale | round),
+            h: ((if (.transform % 2) == 1 then .width else .height end) / .scale | round),
+            focused: .focused
+          } ] as $mons
+        | $g[0] as $x | $g[1] as $y | $g[2] as $w | $g[3] as $h
+        | if ($mons | length) == 0 then "\($x) \($y) \($w) \($h)" else
+            ( [ $mons[]
+                | { m: ., ov: [ ([ (.x + .w), ($x + $w) ] | min) - ([ .x, $x ] | max),
+                                ([ (.y + .h), ($y + $h) ] | min) - ([ .y, $y ] | max) ] }
+                | select(.ov[0] > 0 and .ov[1] > 0) ]
+              | sort_by(- (.ov[0] * .ov[1])) | .[0] ) as $best
+            | ( $best.m // ($mons[] | select(.focused)) // $mons[0] ) as $m
+            | if $best != null
+                 and $best.ov[0] >= $min[0] and $best.ov[1] >= $min[1]
+                 and $w <= $m.w and $h <= $m.h
+              then "\($x) \($y) \($w) \($h)"
+              else
+                ([$w, $m.w] | min) as $nw
+                | ([$h, $m.h] | min) as $nh
+                | ([ ([ $x, $m.x ] | max), ($m.x + $m.w - $nw) ] | min) as $nx
+                | ([ ([ $y, $m.y ] | max), ($m.y + $m.h - $nh) ] | min) as $ny
+                | "\($nx) \($ny) \($nw) \($nh)"
+              end
+          end'
+}
+
 apply_geometry() {
     local addr=$1 geom x y w h
     geom=$(saved)
@@ -107,6 +155,7 @@ apply_geometry() {
         return
     fi
     read -r x y w h <<< "$geom"
+    read -r x y w h <<< "$(fit_to_monitors "$x" "$y" "$w" "$h")"
     # Position last: a resize anchors the top-left, so moving afterwards cannot be undone
     # by it.
     hyprctl --batch "dispatch setfloating address:$addr ; \
@@ -186,6 +235,15 @@ cmd_geometry() {
     printf '%s\t%s\t%s\t%s\n' "$x" "$y" "$w" "$h"
 }
 
+# Exposed so the clamp can be exercised against a stubbed `hyprctl monitors` rather than
+# only against whatever displays happen to be plugged in.
+cmd_fit() {
+    [ "$#" -eq 4 ] || die "fit needs x y width height"
+    need hyprctl
+    need jq
+    fit_to_monitors "$1" "$2" "$3" "$4"
+}
+
 cmd_forget() {
     stop_recorder
     rm -f "$GEOM_FILE"
@@ -195,6 +253,7 @@ case "${1:-open}" in
     open)     cmd_open ;;
     watch)    shift; cmd_watch "$@" ;;
     geometry) cmd_geometry ;;
+    fit)      shift; cmd_fit "$@" ;;
     forget)   cmd_forget ;;
-    *)        die "usage: hypr-terminal-last [open|geometry|forget]" ;;
+    *)        die "usage: hypr-terminal-last [open|geometry|fit <x> <y> <w> <h>|forget]" ;;
 esac
