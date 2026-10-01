@@ -29,6 +29,19 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hypr"
 STATE_FILE="$STATE_DIR/terminal"
 DIRS=("$HOME/.local/share/applications" /usr/share/applications)
 
+# $TERMINAL is pushed through the dotfiles' hypr-set.sh, because the instruction is not the
+# same under both Hyprland config languages: hyprlang wrote `env = NAME,value` and took it
+# through `hyprctl keyword`, which a Lua config (0.56+) refuses outright in favour of
+# `hyprctl eval 'hl.env(...)'`. Sourced defensively and then checked by name — this repo is
+# cloned separately from the dotfiles, so the file may be absent, and a dotfiles checkout
+# from before hypr_env existed would define its siblings without it. Either way the
+# fallback keeps the hyprlang behaviour, which is what a machine without the dotfiles has.
+# shellcheck source=/dev/null
+[ -r "$HOME/.config/hypr/scripts/hypr-set.sh" ] && . "$HOME/.config/hypr/scripts/hypr-set.sh"
+command -v hypr_env >/dev/null 2>&1 || hypr_env() {
+    hyprctl keyword env "$1,$2" >/dev/null 2>&1 || true
+}
+
 die() { printf 'hypr-terminal: %s\n' "$1" >&2; exit 1; }
 
 # id<TAB>name<TAB>exec for one desktop file, or nothing if it is not a terminal.
@@ -107,7 +120,7 @@ cmd_apply() {
     # when they start after this point — nothing already running notices.
     if command -v hyprctl >/dev/null; then
         local first; read -r first _ <<< "$exec"
-        hyprctl keyword env "TERMINAL,$first" >/dev/null 2>&1 || true
+        hypr_env TERMINAL "$first"
     fi
 
     if command -v notify-send >/dev/null; then
