@@ -6,16 +6,29 @@
 # layer is no good: Hyprland autoreloads on a config write, and a reload re-reads the base
 # palette, which throws away the theme colours theme-apply.sh pushed in at runtime.
 #
-# So it is a state file plus `hyprctl keyword`, and `restore` re-applies the file. The
-# dotfiles run `restore` with `exec =` rather than `exec-once =`, so it runs after every
-# reload as well as at login. That includes the reload perf-mode.sh uses to come back out
-# of performance mode.
+# So it is a state file plus a runtime push, and `restore` re-applies the file. The
+# dotfiles run `restore` on every config load rather than once per session, so it runs
+# after every reload as well as at login. That includes the reload perf-mode.sh uses to
+# come back out of performance mode.
 #
-# Only effects that have been flipped here are in the file. Anything else follows
-# conf.d/appearance.conf, so turning an effect off there is not overridden by a stale
-# "on" from here.
+# Only effects that have been flipped here are in the file. Anything else follows the
+# dotfiles' appearance config, so turning an effect off there is not overridden by a
+# stale "on" from here.
+#
+# The push itself goes through the dotfiles' scripts/hypr-set.sh, because the instruction
+# is not the same under both Hyprland config languages: `hyprctl keyword` is refused under
+# a Lua config (0.56+) and `hyprctl eval` is refused under hyprlang. The helper picks. It
+# is sourced defensively — this repo is cloned separately from the dotfiles, and on a
+# machine with only this one the fallback keeps the hyprlang behaviour.
 
 set -euo pipefail
+
+# shellcheck source=/dev/null
+if [ -r "$HOME/.config/hypr/scripts/hypr-set.sh" ]; then
+    . "$HOME/.config/hypr/scripts/hypr-set.sh"
+else
+    hypr_set() { hyprctl keyword "$1" "$2" >/dev/null 2>&1 || true; }
+fi
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hypr"
 STATE_FILE="$STATE_DIR/effects"
@@ -66,7 +79,7 @@ cmd_set() {
 
     # In performance mode the choice is recorded but not applied. It applies when the mode
     # ends, since that reload runs `restore`.
-    perf_mode_on || hyprctl keyword "$(key_of "$name")" "$value" >/dev/null
+    perf_mode_on || hypr_set "$(key_of "$name")" "$value"
 }
 
 cmd_toggle() {
@@ -78,12 +91,14 @@ cmd_toggle() {
 cmd_restore() {
     [ -r "$STATE_FILE" ] || return 0
     perf_mode_on && return 0
-    local e v batch=""
+    # One push each rather than a single `hyprctl --batch`: --batch chains `keyword`
+    # sub-commands, which a Lua config refuses outright, so the whole batch would fail
+    # rather than half-apply. Two effects, two round trips.
+    local e v
     for e in "${EFFECTS[@]}"; do
         v=$(stored "$e")
-        [ -n "$v" ] && batch+="keyword $(key_of "$e") $v ; "
+        [ -n "$v" ] && hypr_set "$(key_of "$e")" "$v"
     done
-    [ -n "$batch" ] && hyprctl --batch "$batch" >/dev/null
     return 0
 }
 
