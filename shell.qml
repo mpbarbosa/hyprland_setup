@@ -15,6 +15,7 @@ ShellRoot {
     readonly property string islandBin: Qt.resolvedUrl("bin/island").toString().replace(/^file:\/\//, "")
     readonly property string termHelper: Qt.resolvedUrl("scripts/hypr-terminal").toString().replace(/^file:\/\//, "")
     readonly property string effectsHelper: Qt.resolvedUrl("scripts/hypr-effects").toString().replace(/^file:\/\//, "")
+    readonly property string wifiHelper: Qt.resolvedUrl("scripts/hypr-wifi").toString().replace(/^file:\/\//, "")
 
     property var setups: []
     property string current: "default"
@@ -206,6 +207,116 @@ ShellRoot {
         termApplier.running = true;
     }
 
+    // ---------------------------------------------------------------- wi-fi
+    property var networks: []
+    property string currentWifi: ""
+    property bool wifiRadio: true
+    property string connecting: ""
+
+    // Same header-led TSV as every other helper, but the numbers have to come back as
+    // numbers: the signal drives a four-bar meter and `saved` drives whether the panel
+    // stops to ask for a password, and a string "0" is true.
+    function parseNetworks(text) {
+        var rows = root.parseTerminals(text);
+        for (var i = 0; i < rows.length; i++) {
+            rows[i].signal = parseInt(rows[i].signal, 10) || 0;
+            rows[i].saved = rows[i].saved === "1";
+            rows[i].active = rows[i].active === "1";
+        }
+        return rows;
+    }
+
+    Process {
+        id: wifiLister
+        running: true
+        command: [root.wifiHelper, "list"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                root.networks = root.parseNetworks(this.text);
+                for (var i = 0; i < root.networks.length; i++)
+                    if (root.networks[i].active)
+                        root.currentWifi = root.networks[i].ssid;
+            }
+        }
+    }
+
+    Process {
+        id: wifiStatus
+        running: true
+        command: [root.wifiHelper, "status"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var rows = root.parseTerminals(this.text);
+                if (rows.length > 0) {
+                    root.wifiRadio = rows[0].radio === "1";
+                    root.currentWifi = rows[0].ssid;
+                }
+            }
+        }
+    }
+
+    // `list` reads NetworkManager's cached scan, which is instant and can be minutes old.
+    // A scan is asked for when the page is first opened and the results are picked up a
+    // few seconds later, rather than blocking the first paint on a radio sweep.
+    Process {
+        id: wifiRescan
+        command: [root.wifiHelper, "rescan"]
+        onExited: wifiSettle.restart()
+    }
+
+    Timer {
+        id: wifiSettle
+        interval: 3000
+        onTriggered: wifiLister.running = true
+    }
+
+    Process {
+        id: wifiRadioToggle
+        command: [root.wifiHelper, "radio", "toggle"]
+        stderr: StdioCollector {
+            onStreamFinished: if (this.text.trim() !== "") root.error = this.text.trim()
+        }
+        // Re-ask rather than flip locally, as the island and the effects do: the helper
+        // is the one that knows whether the change landed.
+        onExited: {
+            wifiStatus.running = true;
+            wifiLister.running = true;
+            wifiRescan.running = true;
+        }
+    }
+
+    // The only process here that is handed a secret, and the reason it goes over stdin:
+    // an argument would be readable in /proc for as long as the helper runs.
+    Process {
+        id: wifiConnector
+        stdinEnabled: true
+        stderr: StdioCollector {
+            onStreamFinished: if (this.text.trim() !== "") root.error = this.text.trim()
+        }
+        onExited: function (code) {
+            root.connecting = "";
+            if (code === 0)
+                Qt.quit();
+            else
+                wifiStatus.running = true;   // the panel stays up, showing why
+        }
+    }
+
+    function connectWifi(ssid, password) {
+        if (wifiConnector.running)
+            return;
+        root.error = "";
+        root.connecting = ssid;
+        wifiConnector.command = password === ""
+            ? [root.wifiHelper, "connect", ssid]
+            : [root.wifiHelper, "connect", "--password-stdin", ssid];
+        wifiConnector.running = true;
+        if (password !== "") {
+            wifiConnector.write(password + "\n");
+            wifiConnector.stdinEnabled = false;   // the helper reads one line and waits
+        }
+    }
+
     // The island is a separate long-lived process, so the panel reports and flips it
     // rather than owning it — closing the panel must not take the island down with it.
     property bool islandRunning: false
@@ -292,6 +403,18 @@ ShellRoot {
         applier.running = true;
     }
 
+    // Scanning is asked for once, when the Wi-Fi page is first opened. Doing it at startup
+    // would spend a radio sweep on every panel invocation, almost all of which never reach
+    // this page.
+    property bool scanned: false
+
+    function scanOnce() {
+        if (scanned)
+            return;
+        scanned = true;
+        wifiRescan.running = true;
+    }
+
     // A backstop for an apply that never returns: better to leave a stray shell process
     // behind than to hold an invisible exclusive-keyboard layer over the desktop.
     Timer {
@@ -314,6 +437,13 @@ ShellRoot {
         terminals: root.terminals
         currentTerminal: root.currentTerminal
         onTerminalRequested: function (exec) { root.applyTerminal(exec); }
+        networks: root.networks
+        currentWifi: root.currentWifi
+        wifiRadio: root.wifiRadio
+        connecting: root.connecting
+        onWifiConnectRequested: function (ssid, password) { root.connectWifi(ssid, password); }
+        onWifiRadioToggleRequested: wifiRadioToggle.running = true
+        onPageChanged: if (picker.page === "wifi") root.scanOnce()
         onDismissed: Qt.quit()
     }
 }

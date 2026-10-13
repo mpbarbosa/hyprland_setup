@@ -18,15 +18,28 @@ PanelWindow {
     required property var terminals
     required property string currentTerminal
 
+    required property var networks          // { ssid, signal, security, saved, active }
+    required property string currentWifi
+    required property bool wifiRadio
+    required property string connecting     // the SSID being joined, or ""
+
     signal applyRequested(string name)
     signal terminalRequested(string exec)
     signal islandToggleRequested()
     signal effectToggleRequested(string name)
+    signal wifiConnectRequested(string ssid, string password)
+    signal wifiRadioToggleRequested()
     signal dismissed()
 
     property int selection: 0
     property string query: ""
-    property string page: "setups"          // "setups" | "terminals"
+    property string page: "setups"          // "setups" | "terminals" | "wifi"
+
+    // Non-empty while the panel is asking for a network's password. The list stays on
+    // screen behind it: the prompt replaces the filter field rather than opening a second
+    // window, so the keyboard handling stays in one place and Esc has one meaning per
+    // state — leave the prompt, then leave the panel.
+    property string pendingSsid: ""
 
     // Row geometry lives here rather than in the delegate because the sheet has to size
     // itself from the model alone. Reading list.contentHeight instead would make the
@@ -36,16 +49,17 @@ PanelWindow {
     readonly property int rowHeight: 62
     readonly property int rowSpacing: 4
 
-    // Both pages are lists of named things, so they share one filter, one selection and
+    // Every page is a list of named things, so they share one filter, one selection and
     // one set of keys; only what Enter does with the result differs.
-    readonly property var items: page === "setups" ? setups : terminals
+    readonly property var items: page === "setups" ? setups
+                               : page === "terminals" ? terminals : networks
 
     // Ranked, not just filtered: a plain substring test puts catppuccin above tokyo-night
     // for "tn" and offers no way to type an abbreviation at all.
-    readonly property var filtered: Fuzzy.filter(items, query, "name")
+    readonly property var filtered: Fuzzy.filter(items, query, page === "wifi" ? "ssid" : "name")
 
     function activeList() {
-        return page === "setups" ? list : termList;
+        return page === "setups" ? list : page === "terminals" ? termList : wifiList;
     }
 
     anchors { top: true; bottom: true; left: true; right: true }
@@ -86,10 +100,27 @@ PanelWindow {
     function activate() {
         if (selection < 0 || selection >= filtered.length)
             return;
-        if (page === "setups")
+        if (page === "setups") {
             picker.applyRequested(filtered[selection].name);
-        else
+        } else if (page === "terminals") {
             picker.terminalRequested(filtered[selection].exec);
+        } else {
+            var net = filtered[selection];
+            // Only a secured network with no profile yet needs asking. A saved one has
+            // its key in NetworkManager, and an open one has none — prompting for either
+            // would be a password field that does nothing with what is typed into it.
+            if (net.security !== "" && !net.saved)
+                picker.pendingSsid = net.ssid;
+            else
+                picker.wifiConnectRequested(net.ssid, "");
+        }
+    }
+
+    function submitPassword(password) {
+        var ssid = picker.pendingSsid;
+        picker.pendingSsid = "";
+        if (ssid !== "")
+            picker.wifiConnectRequested(ssid, password);
     }
 
     // With no query, the running setup is the meaningful place to start. Once something
@@ -102,7 +133,8 @@ PanelWindow {
         if (query === "") {
             for (var i = 0; i < filtered.length; i++) {
                 var hit = page === "setups" ? filtered[i].name === current
-                                            : filtered[i].exec === currentTerminal;
+                        : page === "terminals" ? filtered[i].exec === currentTerminal
+                                               : filtered[i].ssid === currentWifi;
                 if (hit) {
                     target = i;
                     break;
@@ -115,7 +147,21 @@ PanelWindow {
 
     onFilteredChanged: resetSelection()
     onCurrentChanged: resetSelection()
-    onPageChanged: resetSelection()
+    onPageChanged: {
+        pendingSsid = "";     // the prompt belongs to a network on the page being left
+        resetSelection();
+    }
+
+    // Focus has to be moved by hand: the two fields share one box and the hidden one keeps
+    // active focus otherwise, which sends the password to the filter. Cleared at both
+    // edges so neither a cancelled prompt nor a sent one leaves the text behind.
+    onPendingSsidChanged: {
+        secret.text = "";
+        if (pendingSsid !== "")
+            secret.forceActiveFocus();
+        else
+            search.forceActiveFocus();
+    }
 
     // Dimming the desktop is what makes the overlay read as modal; without it the sheet
     // looks like a window that merely happens to be on top.
@@ -173,49 +219,113 @@ PanelWindow {
                     anchors.baseline: title.baseline
                     text: picker.page === "setups"
                           ? picker.setups.length + " setups · " + picker.current + " live"
-                          : picker.terminals.length + " terminals installed"
+                          : picker.page === "terminals"
+                            ? picker.terminals.length + " terminals installed"
+                            : picker.connecting !== ""
+                              ? "joining " + picker.connecting + "…"
+                              : !picker.wifiRadio ? "radio off"
+                                : picker.currentWifi !== "" ? "on " + picker.currentWifi
+                                                            : "not connected"
                     color: picker.uiColors["ink-muted"]
                     font.family: "Hack Nerd Font"
                     font.pixelSize: 11
                 }
             }
 
-            // Two pages rather than one longer list: a terminal is not a waybar setup, and
-            // the rows carry different things. Tab moves between them so the panel stays
-            // reachable without the mouse.
-            Row {
-                spacing: 6
+            // Three pages rather than one longer list: a terminal is not a waybar setup
+            // and neither is a network, and the rows carry different things. Tab cycles
+            // them so the panel stays reachable without the mouse.
+            Item {
+                width: parent.width
+                height: 26
 
-                Repeater {
-                    model: [
-                        { key: "setups",    label: "Waybar" },
-                        { key: "terminals", label: "Terminal" }
-                    ]
+                Row {
+                    spacing: 6
 
-                    Rectangle {
-                        required property var modelData
-                        readonly property bool on: picker.page === modelData.key
+                    Repeater {
+                        model: [
+                            { key: "setups",    label: "Waybar" },
+                            { key: "terminals", label: "Terminal" },
+                            { key: "wifi",      label: "Wi-Fi" }
+                        ]
 
-                        width: tabText.implicitWidth + 24
-                        height: 26
-                        radius: 13
-                        color: on ? Qt.alpha(picker.uiColors.accent, 0.20)
-                                  : tabHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.07)
-                                                     : "transparent"
-                        border.width: 1
-                        border.color: on ? Qt.alpha(picker.uiColors.accent, 0.55)
-                                         : Qt.alpha(picker.uiColors["ink-faint"], 0.3)
+                        Rectangle {
+                            required property var modelData
+                            readonly property bool on: picker.page === modelData.key
 
-                        HoverHandler { id: tabHover }
-                        TapHandler { onTapped: picker.page = modelData.key }
+                            width: tabText.implicitWidth + 24
+                            height: 26
+                            radius: 13
+                            color: on ? Qt.alpha(picker.uiColors.accent, 0.20)
+                                      : tabHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.07)
+                                                         : "transparent"
+                            border.width: 1
+                            border.color: on ? Qt.alpha(picker.uiColors.accent, 0.55)
+                                             : Qt.alpha(picker.uiColors["ink-faint"], 0.3)
+
+                            HoverHandler { id: tabHover }
+                            TapHandler { onTapped: picker.page = modelData.key }
+
+                            Text {
+                                id: tabText
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                color: parent.on ? picker.uiColors.ink : picker.uiColors["ink-muted"]
+                                font.family: "Hack Nerd Font"
+                                font.pixelSize: 12
+                            }
+                        }
+                    }
+                }
+
+                // The radio switch belongs beside the networks rather than down with the
+                // island and the window effects: with it off the list below is empty, and
+                // an empty list whose explanation is three rows further down reads as a
+                // picker that is broken rather than one that is switched off.
+                Rectangle {
+                    id: radioChip
+                    visible: picker.page === "wifi"
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: radioRow.implicitWidth + 16
+                    height: 26
+                    radius: 6
+                    color: radioHover.hovered ? Qt.alpha(picker.uiColors.ink, 0.06) : "transparent"
+
+                    HoverHandler { id: radioHover }
+                    TapHandler { onTapped: picker.wifiRadioToggleRequested() }
+
+                    Row {
+                        id: radioRow
+                        anchors.centerIn: parent
+                        spacing: 8
 
                         Text {
-                            id: tabText
-                            anchors.centerIn: parent
-                            text: modelData.label
-                            color: parent.on ? picker.uiColors.ink : picker.uiColors["ink-muted"]
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Radio"
+                            color: picker.wifiRadio ? picker.uiColors.ink : picker.uiColors["ink-muted"]
                             font.family: "Hack Nerd Font"
                             font.pixelSize: 12
+                        }
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 34
+                            height: 18
+                            radius: height / 2
+                            color: picker.wifiRadio ? picker.uiColors["accent-alt"]
+                                                    : Qt.alpha(picker.uiColors["ink-faint"], 0.35)
+                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                            Rectangle {
+                                width: 12
+                                height: 12
+                                radius: 6
+                                y: 3
+                                x: picker.wifiRadio ? parent.width - width - 3 : 3
+                                color: picker.uiColors["ground-solid"]
+                                Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            }
                         }
                     }
                 }
@@ -229,6 +339,7 @@ PanelWindow {
 
                 TextInput {
                     id: search
+                    visible: picker.pendingSsid === ""
                     anchors.fill: parent
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
@@ -248,7 +359,8 @@ PanelWindow {
                     Keys.onEscapePressed: picker.dismissed()
                     // The rest of this panel is driven from the keyboard, so the island
                     // row is too rather than being the one mouse-only control in it.
-                    Keys.onTabPressed: picker.page = (picker.page === "setups" ? "terminals" : "setups")
+                    Keys.onTabPressed: picker.page = (picker.page === "setups" ? "terminals"
+                                                    : picker.page === "terminals" ? "wifi" : "setups")
                     Keys.onPressed: function (event) {
                         if (!(event.modifiers & Qt.ControlModifier))
                             return;
@@ -258,6 +370,8 @@ PanelWindow {
                             picker.effectToggleRequested("shadow");
                         else if (event.key === Qt.Key_B)
                             picker.effectToggleRequested("blur");
+                        else if (event.key === Qt.Key_W)
+                            picker.wifiRadioToggleRequested();
                         else
                             return;
                         event.accepted = true;
@@ -269,6 +383,39 @@ PanelWindow {
                         text: "Type to filter…"
                         color: picker.uiColors["ink-faint"]
                         font: search.font
+                    }
+                }
+
+                // The same box, in the one state where typing does not mean filtering.
+                // Cleared on the way in rather than on the way out, so a password is not
+                // left sitting in a live TextInput after the panel has moved on.
+                TextInput {
+                    id: secret
+                    visible: picker.pendingSsid !== ""
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    verticalAlignment: TextInput.AlignVCenter
+                    echoMode: TextInput.Password
+                    color: picker.uiColors.ink
+                    font.family: "Hack Nerd Font"
+                    font.pixelSize: 13
+                    selectByMouse: false
+
+                    Keys.onReturnPressed: picker.submitPassword(text)
+                    Keys.onEnterPressed: picker.submitPassword(text)
+                    // Back to the list, not out of the panel: a mistyped Enter on the
+                    // wrong network should cost one key, not the whole gesture.
+                    Keys.onEscapePressed: picker.pendingSsid = ""
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: secret.text === ""
+                        text: "Password for " + picker.pendingSsid
+                        color: picker.uiColors["ink-faint"]
+                        font: secret.font
+                        elide: Text.ElideRight
+                        width: parent.width
                     }
                 }
             }
@@ -337,6 +484,54 @@ PanelWindow {
                     active: modelData.exec === picker.currentTerminal
                     selected: index === picker.selection
                     onClicked: picker.terminalRequested(modelData.exec)
+                }
+            }
+
+            ListView {
+                id: wifiList
+                width: parent.width
+                height: parent.height - y - islandRow.height - effectsRow.height - 2 * parent.spacing
+                clip: true
+                spacing: picker.rowSpacing
+                visible: picker.page === "wifi"
+                model: picker.page === "wifi" ? picker.filtered : []
+                boundsBehavior: Flickable.StopAtBounds
+
+                onCountChanged: Qt.callLater(picker.syncView)
+                onHeightChanged: Qt.callLater(picker.syncView)
+                Component.onCompleted: Qt.callLater(picker.syncView)
+
+                delegate: WifiCard {
+                    required property var modelData
+                    required property int index
+
+                    width: wifiList.width
+                    height: picker.rowHeight
+                    network: modelData
+                    uiColors: picker.uiColors
+                    active: modelData.ssid === picker.currentWifi
+                    selected: index === picker.selection
+                    onClicked: {
+                        picker.selection = index;
+                        picker.activate();
+                    }
+                }
+
+                // An empty list has two very different causes here, and neither is
+                // obvious from a blank panel: the radio is off, or the scan has not come
+                // back yet. Saying which is the whole of the fix.
+                Text {
+                    anchors.centerIn: parent
+                    visible: wifiList.count === 0
+                    width: parent.width - 24
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: !picker.wifiRadio ? "The wi-fi radio is off."
+                        : picker.query !== "" ? "No network matches."
+                                              : "Scanning…"
+                    color: picker.uiColors["ink-muted"]
+                    font.family: "Hack Nerd Font"
+                    font.pixelSize: 12
                 }
             }
 
@@ -516,7 +711,9 @@ PanelWindow {
         anchors.horizontalCenter: sheet.horizontalCenter
         anchors.top: sheet.bottom
         anchors.topMargin: 10
-        text: "↑↓ move · Tab page · Enter apply · Ctrl+I island · Ctrl+S shadow · Ctrl+B blur · Esc cancel"
+        text: picker.pendingSsid !== ""
+              ? "Enter join · Esc back to the list"
+              : "↑↓ move · Tab page · Enter apply · Ctrl+I island · Ctrl+S shadow · Ctrl+B blur · Ctrl+W radio · Esc cancel"
         color: Qt.alpha(picker.uiColors.ink, 0.55)
         font.family: "Hack Nerd Font"
         font.pixelSize: 11

@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# What wireless networks are in range, and which one this machine is on.
+#
+# NetworkManager is the only backend. It is what is running here, and unlike the terminal
+# and waybar helpers there is nothing to discover: a second backend (iwd, wpa_supplicant)
+# would not be a different list to parse but a different model of what a saved network is.
+#
+# Two things shape the rest of this script:
+#
+#   * A password must never reach a command line. /proc/<pid>/cmdline is world-readable,
+#     so `nmcli device wifi connect SSID password hunter2` hands the key to every process
+#     on the box for as long as nmcli runs. The password is read from stdin here and
+#     handed to nmcli through `connection up ... passwd-file`, a file written with umask
+#     077 under $XDG_RUNTIME_DIR (0700, tmpfs) and deleted on the way out. That is also
+#     why `device wifi connect` — which has no passwd-file option, only `password` — is
+#     used for open networks only, and a secured network's profile is built by hand.
+#
+#   * Scanning is slow and listing is not. `nmcli device wifi list` defaults to --rescan
+#     auto, which blocks for seconds whenever NetworkManager's list is older than 30s, so
+#     `list` passes --rescan no and reads the cache. `rescan` is a separate command, for a
+#     caller that wants a fresh list and can wait a few seconds for it to land.
+#
+# Neither this nor NetworkManager needs a state file: unlike the waybar theme and the
+# terminal, the choice of network IS the system state, and NM already persists it.
+
+set -euo pipefail
+
+die() { printf 'hypr-wifi: %s\n' "$1" >&2; exit 1; }
+
+# The password file is tracked in a global and removed by a single trap installed here,
+# rather than by a trap set where it is written. A trap body is evaluated when it fires,
+# by which time a `local` has gone out of scope — under `set -u` that is an "unbound
+# variable" at exit and, worse, a secret left on disk after the connect that SUCCEEDED.
+SECRET_FILE=""
+cleanup() { [ -n "$SECRET_FILE" ] && rm -f "$SECRET_FILE"; return 0; }
+trap cleanup EXIT INT TERM
+
+command -v nmcli >/dev/null 2>&1 || die "nmcli not found; this needs NetworkManager"
+
+# nmcli -t escapes ":" as "\:" and "\" as "\\", so a field that can hold either has to be
+# walked rather than split. Kept as one awk source string because three commands need it.
+# nmcli waits 90s for an activation by default. That is a long time for a caller that put
+# a modal panel on screen and is holding the keyboard while it waits, and far longer than
+# an association plus DHCP takes when it is going to work at all.
+WAIT=25
+
+AWK_UNESC='
+function unesc(s,   out, i, c) {
+    out = ""
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "\\" && i < length(s)) { i++; out = out substr(s, i, 1) }
+        else out = out c
+    }
+    return out
+}
+'
+
+wifi_device() {
+    nmcli -t -f TYPE,DEVICE device | sed -n 's/^wifi://p' | head -n1
+}
+
+radio_on() { [ "$(nmcli radio wifi)" = "enabled" ]; }
+
+# ------------------------------------------------------------------------------ list
+#
+# One row per SSID rather than per access point: a mesh or a dual-band router answers the
+# scan once per radio, and three rows called "saigon-sh" are three ways to say the same
+# thing. nmcli already sorts by signal descending, so the first sighting of a name is its
+# strongest, and "in use" is true if any of its radios is the one we are on.
+#
+# Hidden networks come back with an empty SSID. They are dropped: there is no name to show
+# and no name to connect by.
+#
+# `saved` is whether a profile is NAMED after the SSID, which is what nmcli, GNOME and
+# netplan all do when they create one. Asking NetworkManager properly means one `nmcli
+# connection show <uuid>` per wireless profile — 420ms for the 23 on this machine, against
+# 17ms for the scan itself — and the honest answer is not worth 25x on the path that draws
+# the list. A profile renamed away from its SSID therefore reads as unsaved here; the only
+# cost is a password prompt that was not needed, because `connect` resolves it properly
+# and will bring the existing profile up with the password it was handed.
+cmd_list() {
+    printf 'ssid\tsignal\tsecurity\tsaved\tactive\n'
+    awk "$AWK_UNESC"'
+        FNR == NR {
+            p = index($0, ":")
+            if (p > 0 && substr($0, 1, p - 1) == "802-11-wireless")
+                saved[unesc(substr($0, p + 1))] = 1
+            next
+        }
+        {
+            # IN-USE, SIGNAL and SECURITY cannot contain a colon, so only the SSID that
+            # follows them needs unescaping.
+            p = index($0, ":"); inuse = substr($0, 1, p - 1); r = substr($0, p + 1)
+            p = index(r, ":");  sig   = substr(r, 1, p - 1);  r = substr(r, p + 1)
+            p = index(r, ":");  sec   = substr(r, 1, p - 1)
+            ssid = unesc(substr(r, p + 1))
+
+            if (ssid == "") next
+            if (sec == "--") sec = ""
+
+            if (!(ssid in seen)) {
+                seen[ssid] = 1
+                order[++n] = ssid
+                signal[ssid] = sig
+                security[ssid] = sec
+            }
+            if (inuse ~ /\*/) active[ssid] = 1
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                s = order[i]
+                printf "%s\t%s\t%s\t%d\t%d\n", s, signal[s], security[s],
+                       (s in saved), (s in active)
+            }
+        }
+    ' <(nmcli -t -f TYPE,NAME connection show) \
+      <(nmcli -t -f IN-USE,SIGNAL,SECURITY,SSID device wifi list --rescan no)
+}
+
+# The SSID actually associated, read from the scan rather than from the active profile:
+# the profile's name is whatever it was called, and the SSID is what the network is.
+cmd_current() {
+    nmcli -t -f IN-USE,SSID device wifi list --rescan no |
+        awk "$AWK_UNESC"'
+            /^\*:/ { print unesc(substr($0, 3)); exit }
+        '
+}
+
+cmd_status() {
+    local dev; dev=$(wifi_device)
+    printf 'device\tstate\tssid\tradio\n'
+    printf '%s\t%s\t%s\t%s\n' \
+        "${dev:-none}" \
+        "$([ -n "$dev" ] && nmcli -t -f DEVICE,STATE device | sed -n "s/^$dev://p" || echo unavailable)" \
+        "$(cmd_current)" \
+        "$(radio_on && echo 1 || echo 0)"
+}
+
+# Asks for a scan and returns; it does not wait for the results. A scan takes seconds and
+# NetworkManager refuses a second one while the first is running, which is not an error
+# worth failing on — the caller re-reads `list` when it is ready to.
+cmd_rescan() {
+    nmcli device wifi rescan >/dev/null 2>&1 || true
+}
+
+cmd_radio() {
+    case "${1:-}" in
+        on|off) nmcli radio wifi "$1" >/dev/null ;;
+        toggle) if radio_on; then nmcli radio wifi off >/dev/null; else nmcli radio wifi on >/dev/null; fi ;;
+        *)      die "radio needs on, off or toggle" ;;
+    esac
+}
+
+# The uuid of the profile for an SSID, by asking each wireless profile what its SSID is.
+# Slow (one spawn per profile) and exact, which is the right trade on a path the user
+# triggers once, by hand.
+profile_for() {
+    local ssid=$1 uuid
+    while IFS= read -r uuid; do
+        [ -n "$uuid" ] || continue
+        [ "$(nmcli -g 802-11-wireless.ssid connection show uuid "$uuid" 2>/dev/null)" = "$ssid" ] || continue
+        printf '%s\n' "$uuid"
+        return 0
+    done < <(nmcli -t -f TYPE,UUID connection show | sed -n 's/^802-11-wireless://p')
+    return 1
+}
+
+# The SECURITY column for an SSID in range, "open" when it has none, or "absent" when the
+# scan does not have it at all.
+#
+# Three named answers rather than two and an empty string: an awk that printed nothing
+# would otherwise be indistinguishable from an open network, and "connect to it without a
+# password" is the wrong way for a broken read to fail. That is not hypothetical — `awk
+# "$prog" -v want=x` parses the -v as a FILE, silently prints nothing and exits 0, which
+# is exactly how this read every network as open until it was caught.
+security_of() {
+    awk -v want="$1" "$AWK_UNESC"'
+        {
+            p = index($0, ":"); sec = substr($0, 1, p - 1)
+            if (unesc(substr($0, p + 1)) != want) next
+            print (sec == "" || sec == "--") ? "open" : sec
+            found = 1
+            exit
+        }
+        END { if (!found) print "absent" }
+    ' <(nmcli -t -f SECURITY,SSID device wifi list --rescan no)
+}
+
+# Which key management a hand-built profile should ask for. Only reached for a network
+# with no profile yet, since an existing one already knows.
+#
+# A WPA2/WPA3 transition AP advertises both and accepts either, so it gets wpa-psk: it is
+# the one every adapter and driver here can do, where SAE is not. Pure WPA3 has no such
+# choice.
+key_mgmt_for() {
+    case "$1" in
+        open)            echo open ;;
+        *802.1X*)        echo enterprise ;;
+        *WPA3*|*SAE*)    case "$1" in *WPA1*|*WPA2*) echo wpa-psk ;; *) echo sae ;; esac ;;
+        *WPA*)           echo wpa-psk ;;
+        *WEP*)           echo wep ;;
+        *)               echo unknown ;;
+    esac
+}
+
+# A 0600 file under the 0700 tmpfs NetworkManager and everything else already trusts, so
+# the password is on disk only for the length of the activation and only for this user.
+# Falls back to a private mktemp directory on a machine with no runtime dir.
+#
+# Sets $SECRET_FILE rather than printing the path, because the caller would capture a
+# printed one with `$(...)` — a subshell, whose assignment to the global the trap reads
+# would never reach this process, leaving the secret on disk exactly as a `local` did.
+passwd_file() {   # $1 = property, $2 = secret
+    local dir=${XDG_RUNTIME_DIR:-}
+    [ -n "$dir" ] && [ -d "$dir" ] && [ -w "$dir" ] || dir=$(mktemp -d)
+    SECRET_FILE=$(umask 077; mktemp "$dir/hypr-wifi.XXXXXX")
+    printf '802-11-wireless-security.%s:%s\n' "$1" "$2" > "$SECRET_FILE"
+}
+
+# Reads the tty with echo off and leaves the answer in $password. A function rather than
+# two copies, because it is now asked for at two different points in cmd_connect.
+prompt_password() {
+    printf 'Password for %s: ' "$1" >&2
+    IFS= read -rs password || true
+    printf '\n' >&2
+}
+
+cmd_connect() {
+    local ask=0 stdin_password=0 ssid="" password=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --password-stdin) stdin_password=1; shift ;;
+            --ask)            ask=1; shift ;;
+            --)               shift; break ;;
+            -*)               die "unknown option: $1" ;;
+            *)                break ;;
+        esac
+    done
+    ssid=${1:-}
+    [ -n "$ssid" ] || die "connect needs an SSID"
+
+    # stdin is drained here because the caller has already written it and is waiting; the
+    # tty prompt is not, because at this point nothing is known about the network yet —
+    # asking for a key before knowing there is anything to use it on is how `connect --ask
+    # "Some SSID"` came to take a password and then say the network was not in range.
+    if [ "$stdin_password" = 1 ]; then
+        IFS= read -r password || true
+    fi
+
+    local dev; dev=$(wifi_device)
+    [ -n "$dev" ] || die "no wi-fi device"
+    radio_on || die "the wi-fi radio is off (hypr-wifi radio on)"
+
+    local uuid=""
+    uuid=$(profile_for "$ssid" || true)
+
+    local rc=0
+    if [ -n "$uuid" ]; then
+        # A known network. A password given anyway is not ignored — it is how a network
+        # whose key changed gets reconnected without forgetting it first, which is also
+        # why --ask still asks here. An empty answer just reconnects on the stored key.
+        if [ "$ask" = 1 ] && [ -z "$password" ]; then prompt_password "$ssid"; fi
+        if [ -n "$password" ]; then
+            passwd_file psk "$password"
+            nmcli -w "$WAIT" connection up uuid "$uuid" ifname "$dev" passwd-file "$SECRET_FILE" >/dev/null || rc=$?
+        else
+            nmcli -w "$WAIT" connection up uuid "$uuid" ifname "$dev" >/dev/null || rc=$?
+        fi
+        [ "$rc" = 0 ] || die "could not connect to '$ssid' (nmcli exit $rc)"
+        announce "$ssid"
+        return
+    fi
+
+    local sec; sec=$(security_of "$ssid")
+    case "$sec" in
+        absent) die "no network called '$ssid' is in range (hypr-wifi rescan)" ;;
+        "")     die "could not read the scan for '$ssid'" ;;
+    esac
+
+    local km; km=$(key_mgmt_for "$sec")
+    case "$km" in
+        enterprise)
+            die "'$ssid' is an 802.1X network; set it up once in nm-connection-editor" ;;
+        unknown)
+            die "'$ssid' uses a security this does not build profiles for ($sec)" ;;
+        open)
+            # No prompt even under --ask: there is no key to type.
+            nmcli -w "$WAIT" device wifi connect "$ssid" ifname "$dev" >/dev/null || rc=$?
+            [ "$rc" = 0 ] || die "could not connect to '$ssid' (nmcli exit $rc)"
+            announce "$ssid"
+            return ;;
+    esac
+
+    if [ "$ask" = 1 ] && [ -z "$password" ]; then prompt_password "$ssid"; fi
+    [ -n "$password" ] || die "'$ssid' is secured ($sec); it needs a password"
+
+    # Built in two steps rather than by `device wifi connect`, which takes its password on
+    # the command line and has no passwd-file. The profile is added without the secret,
+    # and the secret arrives at activation through the file.
+    nmcli connection add type wifi con-name "$ssid" ifname "$dev" ssid "$ssid" \
+        wifi-sec.key-mgmt "$([ "$km" = wep ] && echo none || echo "$km")" >/dev/null
+
+    passwd_file "$([ "$km" = wep ] && echo wep-key0 || echo psk)" "$password"
+
+    nmcli -w "$WAIT" connection up id "$ssid" ifname "$dev" passwd-file "$SECRET_FILE" >/dev/null || rc=$?
+    if [ "$rc" != 0 ]; then
+        # A wrong password otherwise leaves a profile behind that NetworkManager will keep
+        # retrying, and that the next `list` would show as saved.
+        nmcli connection delete id "$ssid" >/dev/null 2>&1 || true
+        die "could not connect to '$ssid' — wrong password? (nmcli exit $rc)"
+    fi
+    announce "$ssid"
+}
+
+cmd_disconnect() {
+    local dev; dev=$(wifi_device)
+    [ -n "$dev" ] || die "no wi-fi device"
+    nmcli device disconnect "$dev" >/dev/null
+}
+
+# Every profile for the SSID, not just the first: a network connected to under two names
+# over the years has two, and forgetting one leaves the other to autoconnect.
+cmd_forget() {
+    local ssid=${1:-} uuid found=0
+    [ -n "$ssid" ] || die "forget needs an SSID"
+    while uuid=$(profile_for "$ssid"); do
+        nmcli connection delete uuid "$uuid" >/dev/null
+        found=1
+    done
+    [ "$found" = 1 ] || die "no saved network called '$ssid'"
+}
+
+announce() {
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -h "string:x-dunst-stack-tag:hypr-wifi" -t 1500 -u low "Wi-Fi" "$1" || true
+}
+
+case "${1:-list}" in
+    list)       cmd_list ;;
+    current)    cmd_current ;;
+    status)     cmd_status ;;
+    rescan)     cmd_rescan ;;
+    radio)      shift; cmd_radio "$@" ;;
+    connect)    shift; cmd_connect "$@" ;;
+    disconnect) cmd_disconnect ;;
+    forget)     shift; cmd_forget "$@" ;;
+    *)          die "usage: hypr-wifi [list|current|status|rescan|radio on|off|toggle|connect [--ask|--password-stdin] <ssid>|disconnect|forget <ssid>]" ;;
+esac

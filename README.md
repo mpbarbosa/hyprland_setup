@@ -2,9 +2,9 @@
 
 A GUI for Hyprland setup, implemented in [quickshell](https://quickshell.outfoxxed.me/).
 
-Two pages, switched with `Tab`: which waybar setup is live, and which terminal emulator
-Hyprland opens. Below them are switches for the dynamic island and for window shadow and
-blur.
+Three pages, cycled with `Tab`: which waybar setup is live, which terminal emulator
+Hyprland opens, and which wireless network this machine is on. Below them are switches for
+the dynamic island and for window shadow and blur.
 
 ![The picker](docs/picker.png)
 
@@ -44,8 +44,8 @@ bindd = $mainMod SHIFT, T, Waybar setup, exec, ~/Documents/GitHub/hyprland_setup
 ```
 
 `↑` `↓` move, `Tab` switches page, `Enter` applies, `Ctrl+I` toggles the island, `Ctrl+S`
-and `Ctrl+B` toggle window shadow and blur, `Esc` cancels. Clicking a row applies it; clicking outside
-cancels.
+and `Ctrl+B` toggle window shadow and blur, `Ctrl+W` toggles the wi-fi radio, `Esc`
+cancels. Clicking a row applies it; clicking outside cancels.
 
 Typing ranks rather than merely filters, and knows the names are kebab-case, so `tn` finds
 `tokyo-night`, `rp` finds `rose-pine`, and `n` puts `nord` above the longer names that also
@@ -123,6 +123,82 @@ bind lives in the dotfiles, beside the plain `SUPER+Q` one:
 bindd = $mainMod SHIFT, Q, Terminal at its last position, exec, ~/Documents/GitHub/hyprland_setup/scripts/hypr-terminal-last
 ```
 
+## Wi-Fi
+
+The third page lists what is in range, strongest first, and `Enter` joins the selected one.
+A saved network connects straight away; an open one joins with no prompt, which the row
+says in the warning colour before you press anything; a secured one you have never used
+turns the filter field into a password field and connects on the next `Enter`.
+
+NetworkManager is the only backend. It is what is running here, and a second one would not
+be another list to parse but a different model of what a saved network is.
+
+```bash
+./scripts/hypr-wifi list              # what is in range, as TSV
+./scripts/hypr-wifi current           # the SSID this machine is on
+./scripts/hypr-wifi status            # device, state, SSID and radio, as TSV
+./scripts/hypr-wifi rescan            # ask for a fresh scan; does not wait for it
+./scripts/hypr-wifi radio toggle      # also: radio on | off
+./scripts/hypr-wifi connect --ask "Some SSID"
+./scripts/hypr-wifi disconnect
+./scripts/hypr-wifi forget "Some SSID"
+```
+
+### The password never reaches a command line
+
+`/proc/<pid>/cmdline` is world-readable, so the obvious
+
+```
+nmcli device wifi connect "$ssid" password "$pw"
+```
+
+hands the key to every process on the machine for as long as nmcli runs. Instead the
+password arrives on stdin — `connect --password-stdin`, which is what the panel uses, or
+`--ask`, which reads the tty — and reaches nmcli through `connection up ... passwd-file`,
+a file written with `umask 077` under `$XDG_RUNTIME_DIR` and removed by a single `trap` on
+the way out. Two things that look right and are not:
+
+| | |
+| --- | --- |
+| a `trap` set next to the `local` holding the path | a trap body is evaluated when it *fires*, by which time the function has returned — under `set -u` that is an unbound variable at exit, and a secret still on disk after the connect that **succeeded** |
+| `SECRET_FILE=$(passwd_file …)` | the assignment inside a command substitution happens in a subshell, so the global the trap reads stays empty and nothing is ever deleted |
+
+That is also why `nmcli device wifi connect`, whose only password option is on the command
+line, is used for open networks alone, and a secured network's profile is built in two
+steps instead — added without the secret, then activated with it.
+
+### What `saved` means
+
+Whether a profile is *named* after the SSID, which is what nmcli, GNOME and netplan all do
+when they create one. Asking NetworkManager properly costs one `nmcli connection show` per
+wireless profile — 420ms for the 23 on this machine, against 17ms for the scan itself —
+and that is not worth 25x on the path that draws the list.
+
+So a profile renamed away from its SSID reads as unsaved, and the only cost is a password
+prompt that was not needed: `connect` resolves it exactly, and brings the existing profile
+up with whatever it was handed. A network whose key has changed is reconnected the same
+way, without forgetting it first.
+
+### The rest of the shape
+
+| | |
+| --- | --- |
+| one row per SSID, not per access point | a mesh or a dual-band router answers the scan once per radio, and three rows called `saigon-sh` are three ways to say the same thing — the strongest wins, and "in use" is true if any of its radios is the one we are on |
+| `list` passes `--rescan no` | nmcli's default blocks for seconds whenever NetworkManager's cache is older than 30s; the panel asks for a scan when the page is opened and picks the results up three seconds later |
+| hidden networks are dropped | they come back with an empty SSID: no name to show, and no name to connect by |
+| `--ask` prompts only once a key is known to be needed | asking first means `connect --ask "Some SSID"` takes a password and *then* says the network is not in range; an open network is never asked about at all, and a saved one is, since that is how a rotated key gets in |
+| 802.1X is refused with a message | an enterprise network needs more than a password, and guessing at it in a picker is worse than saying so |
+| activation waits 25s, not nmcli's 90 | the caller is a modal panel holding the keyboard, and an association plus DHCP does not take longer than that when it is going to work |
+| a failed first connect deletes the profile it just made | otherwise a typo leaves one behind that NetworkManager keeps retrying, and that the next `list` shows as saved |
+
+Signal is drawn as four bars rather than set from a Nerd Font codepoint. The
+wifi-strength glyphs live in the Material Design private-use block, so a font built without
+it renders four different networks as four identical tofu boxes — and strength is the one
+thing that row exists to show.
+
+Nothing here needs a state file. Unlike the waybar theme and the terminal, the choice of
+network *is* the system state, and NetworkManager already persists it.
+
 ## Dynamic island
 
 A pill under the bar that wakes up when something happens worth a glance — the volume
@@ -194,6 +270,7 @@ hand — trusting it would mark the wrong row as live.
 | `Picker.qml` | the overlay window, filtering and keyboard handling |
 | `SetupCard.qml` | one row of the waybar page |
 | `TerminalCard.qml` | one row of the terminals page |
+| `WifiCard.qml` | one row of the wi-fi page |
 | `BarPreview.qml` | the miniature bar |
 | `island.qml` | the island's entry point; sources, state and window |
 | `IslandPill.qml` | the pill that morphs |
@@ -204,6 +281,7 @@ hand — trusting it would mark the wrong row as live.
 | `scripts/hypr-terminal` | terminal discovery and choice |
 | `scripts/hypr-terminal-last` | the floating terminal that reopens where it was |
 | `scripts/hypr-effects` | window shadow and blur, and restoring them after a reload |
+| `scripts/hypr-wifi` | networks in range, and joining one |
 | `bin/waybar-setup-gui` | toggling launcher |
 
 QML only ever sees resolved values; paths, processes and CSS stop at `shell.qml`.
@@ -224,7 +302,7 @@ a full second before the first row could be drawn.
 
 ## Requires
 
-quickshell 0.3, Qt 6.5+ (for `Qt.alpha`), a wlroots compositor, and a waybar config laid out
-as above. It hands the actual relaunch to `~/.config/hypr/scripts/waybar-launch.sh` when that
+quickshell 0.3, Qt 6.5+ (for `Qt.alpha`), a wlroots compositor, a waybar config laid out as
+above, and NetworkManager for the wi-fi page. It hands the actual relaunch to `~/.config/hypr/scripts/waybar-launch.sh` when that
 exists, so the launch has a single owner, and falls back to invoking waybar directly when it
 does not.
