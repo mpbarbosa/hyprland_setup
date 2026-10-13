@@ -3,6 +3,10 @@ import Quickshell
 
 // Ranking for the picker's filter, so "tn" finds tokyo-night and "rp" finds rose-pine.
 //
+// A word boundary is any of "-_. " rather than the hyphen alone: setup names are
+// kebab-case, but the same filter ranks terminals ("GNOME Terminal") and SSIDs
+// ("Casa_Enseada"), and an abbreviation is how those get typed too.
+//
 // fuzzysort is the usual answer to this and is 682 lines. For fifteen short hyphenated
 // names that is more dependency than the problem deserves, and a scorer that knows the
 // names are kebab-case ranks them better than a general-purpose one: the hyphen is a word
@@ -32,7 +36,7 @@ Singleton {
             var points = 1;
             if (at === 0)
                 points += 8;                       // the very start of the name
-            else if (c.charAt(at - 1) === "-")
+            else if ("-_. ".indexOf(c.charAt(at - 1)) !== -1)
                 points += 6;                       // the start of a word within it
 
             if (at === from && qi > 0) {
